@@ -1,0 +1,984 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>RHI Badminton Doubles — Draw &amp; Bracket</title>
+<link rel="icon" href="data:,">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap');
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; background: #F7F5EE; }
+  button { font-family: 'Inter', sans-serif; cursor: pointer; }
+  input, textarea, select { font-family: 'Inter', sans-serif; }
+  ::-webkit-scrollbar { height: 6px; width: 6px; }
+  ::-webkit-scrollbar-thumb { background: #C4D93B; border-radius: 4px; }
+</style>
+
+<!-- React (no build step needed) -->
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<!-- Firebase (compat SDK — no bundler required) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+  // =====================================================================
+  // FIREBASE SETUP — paste your project's config here.
+  // Get this from: Firebase console → Project settings → General →
+  // "Your apps" → Web app → SDK setup and configuration → Config.
+  // This is safe to leave public in client-side code; access is controlled
+  // by Firestore Security Rules, not by hiding this object.
+  // =====================================================================
+  window.FIREBASE_CONFIG = {
+    apiKey: "AIzaSyDCxFi_u-c861eFKWyaksyxbDoKXyT8_5U",
+    authDomain: "rhi-badminton.firebaseapp.com",
+    projectId: "rhi-badminton",
+    storageBucket: "rhi-badminton.firebasestorage.app",
+    messagingSenderId: "840657399634",
+    appId: "1:840657399634:web:1685538c28a3823a8a148b"
+  };
+  // A single Firestore document (in collection "tournaments") holds all
+  // shared state. Change this if you want to reuse the same Firebase
+  // project for a different event without wiping this one's data.
+  window.TOURNAMENT_ID = "rhi-aug21";
+</script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useEffect, useRef } = React;
+
+/* ---------- Design tokens ----------
+Court teal:  #0F5257 / #16777D
+Chalk bg:    #F7F5EE
+Shuttle lime:#C4D93B
+Charcoal:    #16211F
+Muted:       #6C7A76
+Court line:  #E4E0D2
+------------------------------------- */
+
+const ADMIN_KEY = "rhi-badminton-admin-flag";
+const ADMIN_PIN = "0821"; // change this, then re-save/redeploy the file
+const DEFAULT_COURT_COUNT = 4;
+const DEFAULT_TEAM_COUNT = 10;
+const MAX_TEAMS = 30;
+const MIN_TEAMS = 2;
+
+// ============================ bracket math ============================
+// (Verified with a standalone randomized test harness across team counts
+// 2–30, including odd counts that trigger byes — see project notes.)
+
+function generateSeeds(size) {
+  let seeds = [1, 2];
+  while (seeds.length < size) {
+    const len = seeds.length * 2;
+    const next = [];
+    seeds.forEach((s) => { next.push(s); next.push(len + 1 - s); });
+    seeds = next;
+  }
+  return seeds;
+}
+
+function largestPowerOfTwoLTE(n) {
+  let p = 1;
+  while (p * 2 <= n) p *= 2;
+  return p;
+}
+
+function resolveStage(matches, winners) {
+  return matches.map((m) => {
+    const w = winners[m.id];
+    if (!m.a || !m.b) return { ...m, winner: null, loser: null, status: "pending" };
+    if (!w) return { ...m, winner: null, loser: null, status: "ready" };
+    const winner = w === "A" ? m.a : m.b;
+    const loser = w === "A" ? m.b : m.a;
+    return { ...m, winner, loser, status: "done" };
+  });
+}
+
+function getRound1(teams) {
+  const matches = [];
+  const n = teams.length;
+  const pairCount = Math.floor(n / 2);
+  for (let i = 0; i < pairCount * 2; i += 2) {
+    matches.push({ id: `r1_${matches.length + 1}`, label: "Round 1", a: teams[i], b: teams[i + 1] });
+  }
+  const byeTeam = n % 2 === 1 ? teams[n - 1] : null;
+  return { matches, byeTeam };
+}
+
+function getRound2(round1Resolved) {
+  const { matches: r1matches, bye: r1bye } = round1Resolved;
+  if (r1matches.length === 0 && !r1bye) return { matches: [], bye: null };
+  if (r1matches.some((m) => m.status !== "done")) return { matches: [], bye: null };
+
+  const winners = r1matches.map((m) => m.winner);
+  if (r1bye) winners.push(r1bye);
+  const losers = r1matches.map((m) => m.loser);
+
+  const matches = [];
+  let leftoverWinner = null, leftoverLoser = null;
+
+  for (let i = 0; i + 1 < winners.length; i += 2) {
+    matches.push({ id: `r2_w${matches.length + 1}`, label: "Round 2", a: winners[i], b: winners[i + 1] });
+  }
+  if (winners.length % 2 === 1) leftoverWinner = winners[winners.length - 1];
+
+  for (let i = 0; i + 1 < losers.length; i += 2) {
+    matches.push({ id: `r2_l${matches.length + 1}`, label: "Round 2", a: losers[i], b: losers[i + 1] });
+  }
+  if (losers.length % 2 === 1) leftoverLoser = losers[losers.length - 1];
+
+  let bye = null;
+  if (leftoverWinner && leftoverLoser) {
+    matches.push({ id: "r2_cross", label: "Round 2", a: leftoverWinner, b: leftoverLoser });
+  } else if (leftoverWinner) {
+    bye = leftoverWinner;
+  } else if (leftoverLoser) {
+    bye = leftoverLoser;
+  }
+  return { matches, bye };
+}
+
+function computeRecords(teams, round1Resolved, round2Resolved) {
+  const wins = {}, losses = {};
+  teams.forEach((t) => { wins[t.id] = 0; losses[t.id] = 0; });
+  const apply = (resolved) => {
+    resolved.matches.forEach((m) => {
+      if (m.status === "done") {
+        wins[m.winner.id] = (wins[m.winner.id] || 0) + 1;
+        losses[m.loser.id] = (losses[m.loser.id] || 0) + 1;
+      }
+    });
+    if (resolved.bye) wins[resolved.bye.id] = (wins[resolved.bye.id] || 0) + 1;
+  };
+  apply(round1Resolved);
+  apply(round2Resolved);
+  return teams.map((t) => ({ team: t, wins: wins[t.id] || 0, losses: losses[t.id] || 0 }));
+}
+
+function getPlayoffSize(teamCount) {
+  if (teamCount < 2) return 0;
+  return teamCount >= 8 ? 8 : largestPowerOfTwoLTE(teamCount);
+}
+
+function getPlayoffSeeding(teams, round1Resolved, round2Resolved) {
+  const r1Ready = round1Resolved.matches.length > 0 || round1Resolved.bye;
+  const r1Done = round1Resolved.matches.every((m) => m.status === "done");
+  const r2Exists = round2Resolved.matches.length > 0 || round2Resolved.bye;
+  const r2Done = round2Resolved.matches.every((m) => m.status === "done");
+  if (!r1Ready || !r1Done || !r2Exists || !r2Done) return null;
+
+  const size = getPlayoffSize(teams.length);
+  if (size < 2) return null;
+  const records = computeRecords(teams, round1Resolved, round2Resolved);
+  const sorted = [...records].sort((a, b) => b.wins - a.wins || a.team.drawOrder - b.team.drawOrder);
+  return sorted.slice(0, size).map((r) => r.team);
+}
+
+const ROUND_LABELS = { 8: ["Quarterfinal", "Semifinal", "Final"], 4: ["Semifinal", "Final"], 2: ["Final"] };
+
+function getPlayoffRounds(seeding, playoffWinners) {
+  if (!seeding || seeding.length < 2) return [];
+  const size = seeding.length;
+  const labels = ROUND_LABELS[size] || [];
+  const seeds = generateSeeds(size);
+  let currentTeams = seeds.map((s) => seeding[s - 1]);
+  const rounds = [];
+  let roundIdx = 0;
+  while (currentTeams.length >= 2) {
+    const label = labels[roundIdx] || `Round of ${currentTeams.length}`;
+    const matches = [];
+    for (let i = 0; i < currentTeams.length; i += 2) {
+      matches.push({ id: `po_${roundIdx}_${matches.length + 1}`, label, a: currentTeams[i], b: currentTeams[i + 1] });
+    }
+    const resolved = resolveStage(matches, playoffWinners);
+    rounds.push({ label, matches: resolved });
+    if (resolved.some((m) => m.status !== "done")) break;
+    currentTeams = resolved.map((m) => m.winner);
+    roundIdx++;
+  }
+  return rounds;
+}
+
+function teamLabel(t) {
+  if (!t) return "";
+  return `${t.p1 || "?"} / ${t.p2 || "?"}`;
+}
+
+// ============================ Firebase ============================
+
+let db = null;
+let firebaseReady = false;
+let firebaseConfigMissing = true;
+try {
+  const cfg = window.FIREBASE_CONFIG || {};
+  firebaseConfigMissing = !cfg.apiKey || cfg.apiKey.indexOf("PASTE_YOUR") === 0;
+  if (!firebaseConfigMissing) {
+    firebase.initializeApp(cfg);
+    db = firebase.firestore();
+    firebaseReady = true;
+  }
+} catch (e) {
+  console.error("Firebase init failed", e);
+}
+
+function getDocRef() {
+  return db.collection("tournaments").doc(window.TOURNAMENT_ID || "default");
+}
+
+// ============================ App ============================
+
+function SetupScreen() {
+  return (
+    <div style={{ fontFamily: "'Inter', sans-serif", background: "#F7F5EE", minHeight: "100vh", padding: 24, color: "#16211F" }}>
+      <div style={{ maxWidth: 560, margin: "40px auto", background: "#fff", border: "1px solid #E4E0D2", borderRadius: 14, padding: 24 }}>
+        <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 22, fontWeight: 700, marginBottom: 10, textTransform: "uppercase" }}>
+          Firebase config needed
+        </div>
+        <p style={{ fontSize: 14, lineHeight: 1.6, color: "#3a423f" }}>
+          This page needs a live Firestore database to sync scores across every device in real time.
+          Open <code>index.html</code>, find the <code>FIREBASE_CONFIG</code> block near the top, and paste in
+          your Firebase project's web config (apiKey, projectId, etc.) — then re-upload the file.
+        </p>
+        <p style={{ fontSize: 13, lineHeight: 1.6, color: "#6C7A76" }}>
+          See the setup guide that came with this file for the exact steps (create a free Firebase
+          project → enable Firestore → copy the config → paste here).
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function BadmintonApp() {
+  const [teamCount, setTeamCount] = useState(DEFAULT_TEAM_COUNT);
+  const [courtCount, setCourtCount] = useState(DEFAULT_COURT_COUNT);
+  const [eventName, setEventName] = useState("RHI Team Outing · Aug 21");
+  const [players, setPlayers] = useState(Array.from({ length: DEFAULT_TEAM_COUNT * 2 }, () => ""));
+  const [teams, setTeams] = useState([]);
+  const [round1Winners, setRound1Winners] = useState({});
+  const [round2Winners, setRound2Winners] = useState({});
+  const [playoffWinners, setPlayoffWinners] = useState({});
+  const [matchScores, setMatchScores] = useState({});
+  const [courtOverrides, setCourtOverrides] = useState({});
+  const [minutesPerMatch, setMinutesPerMatch] = useState(15);
+
+  const [tab, setTab] = useState("players");
+  const [loaded, setLoaded] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkText, setBulkText] = useState("");
+  const [toast, setToast] = useState("");
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [pinOpen, setPinOpen] = useState(false);
+  const [pinInput, setPinInput] = useState("");
+  const [stageTab, setStageTab] = useState("r1");
+  const [findQuery, setFindQuery] = useState("");
+  const [syncState, setSyncState] = useState("connecting"); // connecting | live | error
+  const editingPlayers = useRef(false);
+
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 2000); };
+
+  // ---- remote sync ----
+  const applyRemoteData = (data) => {
+    if (!data) return;
+    if (typeof data.teamCount === "number") setTeamCount(data.teamCount);
+    if (typeof data.courtCount === "number") setCourtCount(data.courtCount);
+    if (typeof data.eventName === "string") setEventName(data.eventName);
+    if (data.players && !editingPlayers.current) setPlayers(data.players);
+    if (data.teams) setTeams(data.teams);
+    if (data.round1Winners) setRound1Winners(data.round1Winners);
+    if (data.round2Winners) setRound2Winners(data.round2Winners);
+    if (data.playoffWinners) setPlayoffWinners(data.playoffWinners);
+    if (data.matchScores) setMatchScores(data.matchScores);
+    if (data.courtOverrides) setCourtOverrides(data.courtOverrides);
+    if (typeof data.minutesPerMatch === "number") setMinutesPerMatch(data.minutesPerMatch);
+  };
+
+  useEffect(() => {
+    try {
+      if (localStorage.getItem(ADMIN_KEY) === "true") setIsAdmin(true);
+    } catch (e) {}
+
+    if (!firebaseReady) { setLoaded(true); setSyncState("error"); return; }
+
+    const unsub = getDocRef().onSnapshot(
+      (snap) => {
+        if (snap.exists) applyRemoteData(snap.data());
+        setLoaded(true);
+        setSyncState("live");
+      },
+      (err) => {
+        console.error("Firestore listen error", err);
+        setLoaded(true);
+        setSyncState("error");
+      }
+    );
+    return () => unsub && unsub();
+  }, []);
+
+  const patch = async (obj) => {
+    if (!firebaseReady) { showToast("Not connected — changes won't be saved"); return; }
+    try {
+      await getDocRef().set(obj, { merge: true });
+    } catch (e) {
+      console.error("save failed", e);
+      showToast("Sync error — check connection");
+    }
+  };
+
+  const tryUnlock = () => {
+    if (pinInput === ADMIN_PIN) {
+      setIsAdmin(true);
+      setPinOpen(false);
+      setPinInput("");
+      try { localStorage.setItem(ADMIN_KEY, "true"); } catch (e) {}
+      showToast("Admin mode unlocked");
+    } else {
+      showToast("Wrong PIN");
+      setPinInput("");
+    }
+  };
+
+  const lockAdmin = () => {
+    setIsAdmin(false);
+    try { localStorage.setItem(ADMIN_KEY, "false"); } catch (e) {}
+    showToast("Switched to view-only");
+  };
+
+  // ---- team count / players ----
+  const changeTeamCount = (n) => {
+    const clamped = Math.max(MIN_TEAMS, Math.min(MAX_TEAMS, n || MIN_TEAMS));
+    const nextPlayers = Array.from({ length: clamped * 2 }, (_, i) => players[i] || "");
+    setTeamCount(clamped);
+    setPlayers(nextPlayers);
+    patch({ teamCount: clamped, players: nextPlayers });
+  };
+
+  const filledCount = players.filter((p) => p.trim()).length;
+
+  const shuffleTeams = () => {
+    const names = players.map((p) => p.trim()).filter(Boolean);
+    if (names.length < 4) { showToast("Add at least 4 player names first (2 teams)"); return; }
+    const shuffled = [...names];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    const newTeams = [];
+    for (let i = 0; i < shuffled.length; i += 2) {
+      newTeams.push({ id: `t${newTeams.length + 1}`, drawOrder: newTeams.length, p1: shuffled[i], p2: shuffled[i + 1] || "BYE PARTNER" });
+    }
+    setTeams(newTeams);
+    setRound1Winners({}); setRound2Winners({}); setPlayoffWinners({});
+    setMatchScores({}); setCourtOverrides({});
+    patch({ teams: newTeams, round1Winners: {}, round2Winners: {}, playoffWinners: {}, matchScores: {}, courtOverrides: {} });
+    setTab("teams");
+  };
+
+  const applyBulk = () => {
+    const names = bulkText.split(/\n|,/).map((s) => s.trim()).filter(Boolean).slice(0, MAX_TEAMS * 2);
+    const impliedTeams = Math.max(MIN_TEAMS, Math.min(MAX_TEAMS, Math.ceil(names.length / 2)));
+    const next = Array.from({ length: impliedTeams * 2 }, (_, i) => names[i] || "");
+    setTeamCount(impliedTeams);
+    setPlayers(next);
+    patch({ teamCount: impliedTeams, players: next });
+    setBulkOpen(false);
+    setBulkText("");
+  };
+
+  // ---- derived bracket state ----
+  const round1 = useMemo(() => getRound1(teams), [teams]);
+  const round1Resolved = useMemo(
+    () => ({ matches: resolveStage(round1.matches, round1Winners), bye: round1.byeTeam }),
+    [round1, round1Winners]
+  );
+  const round2 = useMemo(() => getRound2(round1Resolved), [round1Resolved]);
+  const round2Resolved = useMemo(
+    () => ({ matches: resolveStage(round2.matches, round2Winners), bye: round2.bye }),
+    [round2, round2Winners]
+  );
+  const records = useMemo(() => computeRecords(teams, round1Resolved, round2Resolved), [teams, round1Resolved, round2Resolved]);
+  const playoffSize = getPlayoffSize(teams.length);
+  const playoffSeeding = useMemo(
+    () => getPlayoffSeeding(teams, round1Resolved, round2Resolved),
+    [teams, round1Resolved, round2Resolved]
+  );
+  const playoffRounds = useMemo(() => getPlayoffRounds(playoffSeeding, playoffWinners), [playoffSeeding, playoffWinners]);
+  const champion = (() => {
+    if (!playoffRounds.length) return null;
+    const last = playoffRounds[playoffRounds.length - 1];
+    return last.label === "Final" && last.matches[0] && last.matches[0].status === "done" ? last.matches[0].winner : null;
+  })();
+
+  // ---- stages for the schedule UI ----
+  const stages = useMemo(() => {
+    const list = [
+      { key: "r1", label: "Round 1", matches: round1Resolved.matches, bye: round1Resolved.bye, bucket: "r1", locked: teams.length < MIN_TEAMS },
+      { key: "r2", label: "Round 2", matches: round2Resolved.matches, bye: round2Resolved.bye, bucket: "r2", locked: round2.matches.length === 0 && !round2.bye },
+    ];
+    playoffRounds.forEach((r, i) => {
+      list.push({ key: `po_${i}`, label: r.label, matches: r.matches, bye: null, bucket: "playoff", locked: false });
+    });
+    if (playoffRounds.length === 0 && playoffSize >= 2) {
+      list.push({ key: "po_pending", label: "Playoffs", matches: [], bye: null, bucket: "playoff", locked: true });
+    }
+    return list;
+  }, [round1Resolved, round2Resolved, round2, playoffRounds, playoffSize, teams.length]);
+
+  useEffect(() => {
+    // keep the selected stage tab valid as stages change
+    if (!stages.find((s) => s.key === stageTab)) setStageTab(stages[0] ? stages[0].key : "r1");
+  }, [stages]);
+
+  const winnersMapFor = (bucket) => (bucket === "r1" ? round1Winners : bucket === "r2" ? round2Winners : playoffWinners);
+
+  const setStageWinner = (bucket, matchId, side) => {
+    if (bucket === "r1") {
+      const next = { ...round1Winners, [matchId]: side };
+      setRound1Winners(next);
+      patch({ round1Winners: { [matchId]: side } });
+    } else if (bucket === "r2") {
+      const next = { ...round2Winners, [matchId]: side };
+      setRound2Winners(next);
+      patch({ round2Winners: { [matchId]: side } });
+    } else {
+      const next = { ...playoffWinners, [matchId]: side };
+      setPlayoffWinners(next);
+      patch({ playoffWinners: { [matchId]: side } });
+    }
+  };
+
+  const setScore = (matchId, val) => {
+    const next = { ...matchScores, [matchId]: val };
+    setMatchScores(next);
+    patch({ matchScores: { [matchId]: val } });
+  };
+
+  const setCourtOverride = (matchId, courtNum) => {
+    const next = { ...courtOverrides, [matchId]: courtNum };
+    setCourtOverrides(next);
+    patch({ courtOverrides: { [matchId]: courtNum } });
+  };
+
+  // court auto-assignment: round-robin per stage among "ready"/"done" matches,
+  // overridden per-match by admin if set.
+  const courtAssignments = useMemo(() => {
+    const map = {};
+    stages.forEach((s) => {
+      const games = s.matches.filter((g) => g.status === "ready" || g.status === "done");
+      games.forEach((g, idx) => {
+        const auto = (idx % courtCount) + 1;
+        const wave = Math.floor(idx / courtCount) + 1;
+        const court = courtOverrides[g.id] || auto;
+        map[g.id] = { court, wave, auto };
+      });
+    });
+    return map;
+  }, [stages, courtCount, courtOverrides]);
+
+  const timeEstimate = useMemo(() => {
+    let totalMinutes = 0;
+    const perStage = [];
+    stages.forEach((s) => {
+      const games = s.matches.filter((g) => g.status === "ready" || g.status === "done");
+      if (games.length === 0) return;
+      const waves = Math.ceil(games.length / courtCount);
+      const mins = waves * minutesPerMatch;
+      totalMinutes += mins;
+      perStage.push({ stage: s.key, games: games.length, waves, mins });
+    });
+    return { totalMinutes, perStage };
+  }, [stages, courtCount, minutesPerMatch]);
+
+  // ---- find my match ----
+  const findResults = useMemo(() => {
+    const q = findQuery.trim().toLowerCase();
+    if (q.length < 2) return [];
+    const results = [];
+    stages.forEach((s) => {
+      s.matches.forEach((g) => {
+        const inA = g.a && (String(g.a.p1).toLowerCase().includes(q) || String(g.a.p2).toLowerCase().includes(q));
+        const inB = g.b && (String(g.b.p1).toLowerCase().includes(q) || String(g.b.p2).toLowerCase().includes(q));
+        if (inA || inB) {
+          const court = courtAssignments[g.id];
+          results.push({ stage: s.label, match: g, court, mine: inA ? g.a : g.b, opp: inA ? g.b : g.a });
+        }
+      });
+      if (s.bye) {
+        const byeMatch = String(s.bye.p1).toLowerCase().includes(q) || String(s.bye.p2).toLowerCase().includes(q);
+        if (byeMatch) results.push({ stage: s.label, bye: true, mine: s.bye });
+      }
+    });
+    return results;
+  }, [findQuery, stages, courtAssignments]);
+
+  if (firebaseConfigMissing) return <SetupScreen />;
+  if (!loaded) return <div style={{ padding: 40, fontFamily: "Inter, sans-serif", color: "#6C7A76" }}>Loading…</div>;
+
+  const activeStage = stages.find((s) => s.key === stageTab) || stages[0];
+
+  return (
+    <div style={styles.app}>
+      <header style={styles.header}>
+        <div style={styles.headerLine} />
+        <div style={styles.headerRow}>
+          <div style={{ minWidth: 0 }}>
+            <div style={styles.eyebrow}>
+              {syncState === "live" ? "🟢 LIVE" : syncState === "error" ? "🔴 OFFLINE" : "🟡 CONNECTING"}
+            </div>
+            {isAdmin ? (
+              <input
+                value={eventName}
+                onChange={(e) => { setEventName(e.target.value); }}
+                onBlur={() => patch({ eventName })}
+                style={styles.eventNameInput}
+              />
+            ) : (
+              <h1 style={styles.h1}>{eventName}</h1>
+            )}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
+            <div style={styles.courtBadge}>{courtCount} COURTS</div>
+            {isAdmin ? (
+              <button style={styles.adminPillOn} onClick={lockAdmin}>Admin ✓ (tap to lock)</button>
+            ) : (
+              <button style={styles.adminPillOff} onClick={() => setPinOpen(!pinOpen)}>Admin sign-in</button>
+            )}
+          </div>
+        </div>
+        {pinOpen && !isAdmin && (
+          <div style={styles.pinRow}>
+            <input
+              value={pinInput}
+              onChange={(e) => setPinInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && tryUnlock()}
+              placeholder="Enter admin PIN"
+              type="tel"
+              inputMode="numeric"
+              style={styles.pinInput}
+            />
+            <button style={styles.primaryBtn} onClick={tryUnlock}>Unlock</button>
+          </div>
+        )}
+      </header>
+
+      {!isAdmin && (
+        <div style={styles.viewBanner}>
+          👀 View-only — updates from the organizer appear here automatically, no refresh needed.
+        </div>
+      )}
+      {syncState === "error" && (
+        <div style={styles.errorBanner}>
+          ⚠️ Not connected to the live database. Changes won't sync to other devices. (Check your internet connection, or the Firebase config if you're the admin.)
+        </div>
+      )}
+
+      <div style={styles.findBar}>
+        <input
+          value={findQuery}
+          onChange={(e) => setFindQuery(e.target.value)}
+          placeholder="🔎 Find your match — type your name"
+          style={styles.findInput}
+        />
+        {findQuery.trim().length >= 2 && (
+          <div style={styles.findResults}>
+            {findResults.length === 0 && <div style={styles.findEmpty}>No match found yet for "{findQuery}"</div>}
+            {findResults.map((r, i) => (
+              <div key={i} style={styles.findCard}>
+                <div style={styles.findStage}>{r.stage}</div>
+                {r.bye ? (
+                  <div style={styles.findLine}><strong>{teamLabel(r.mine)}</strong> — bye this round, advances automatically</div>
+                ) : (
+                  <>
+                    <div style={styles.findLine}>
+                      <strong>{teamLabel(r.mine)}</strong> vs {teamLabel(r.opp)}
+                    </div>
+                    <div style={styles.findMeta}>
+                      {r.court && <span style={styles.courtTag}>Court {r.court.court} · Wave {r.court.wave}</span>}
+                      <span style={styles.findStatus}>
+                        {r.match.status === "done" ? `Final${r.match.winner === r.mine ? " — won" : " — lost"}` : r.match.status === "ready" ? "Ready to play" : "Waiting"}
+                      </span>
+                    </div>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <nav style={styles.tabs}>
+        {[
+          { key: "players", label: `Players (${filledCount}/${teamCount * 2})` },
+          { key: "teams", label: `Teams (${teams.length})` },
+          { key: "schedule", label: "Schedule" },
+          { key: "standings", label: "Standings" },
+        ].map((t) => (
+          <button key={t.key} onClick={() => setTab(t.key)} style={{ ...styles.tabBtn, ...(tab === t.key ? styles.tabBtnActive : {}) }}>
+            {t.label}
+          </button>
+        ))}
+      </nav>
+
+      <main style={styles.main}>
+        {tab === "players" && (
+          <section>
+            <div style={styles.sectionHead}>
+              <h2 style={styles.h2}>Enter players</h2>
+              {isAdmin && (
+                <button style={styles.linkBtn} onClick={() => setBulkOpen(!bulkOpen)}>
+                  {bulkOpen ? "Close paste box" : "Paste all names"}
+                </button>
+              )}
+            </div>
+
+            {isAdmin && (
+              <div style={styles.card}>
+                <div style={styles.settingsRow}>
+                  <label style={styles.settingsLabel}>Number of teams</label>
+                  <div style={styles.stepper}>
+                    <button style={styles.stepperBtn} onClick={() => changeTeamCount(teamCount - 1)}>−</button>
+                    <input
+                      type="number" min={MIN_TEAMS} max={MAX_TEAMS} value={teamCount}
+                      onChange={(e) => changeTeamCount(Number(e.target.value))}
+                      style={styles.stepperInput}
+                    />
+                    <button style={styles.stepperBtn} onClick={() => changeTeamCount(teamCount + 1)}>+</button>
+                  </div>
+                </div>
+                <div style={styles.settingsRow}>
+                  <label style={styles.settingsLabel}>Number of courts</label>
+                  <div style={styles.stepper}>
+                    <button style={styles.stepperBtn} onClick={() => { const v = Math.max(1, courtCount - 1); setCourtCount(v); patch({ courtCount: v }); }}>−</button>
+                    <input
+                      type="number" min={1} max={12} value={courtCount}
+                      onChange={(e) => { const v = Math.max(1, Math.min(12, Number(e.target.value) || 1)); setCourtCount(v); patch({ courtCount: v }); }}
+                      style={styles.stepperInput}
+                    />
+                    <button style={styles.stepperBtn} onClick={() => { const v = Math.min(12, courtCount + 1); setCourtCount(v); patch({ courtCount: v }); }}>+</button>
+                  </div>
+                </div>
+                <p style={styles.mutedSmall}>Up to {MAX_TEAMS} teams supported. Changing team count resizes the name list below (existing names are kept where possible).</p>
+              </div>
+            )}
+
+            {bulkOpen && isAdmin && (
+              <div style={styles.card}>
+                <textarea
+                  value={bulkText}
+                  onChange={(e) => setBulkText(e.target.value)}
+                  placeholder={"One name per line (or comma-separated)\nRavi\nPriya\nJon\n..."}
+                  rows={6}
+                  style={styles.textarea}
+                />
+                <button style={styles.primaryBtn} onClick={applyBulk}>Fill names (sets team count automatically)</button>
+              </div>
+            )}
+
+            <div style={styles.playerGrid}>
+              {players.map((p, i) => (
+                <div key={i} style={styles.playerRow}>
+                  <span style={styles.playerNum}>{i + 1}</span>
+                  <input
+                    value={p}
+                    disabled={!isAdmin}
+                    onFocus={() => { editingPlayers.current = true; }}
+                    onChange={(e) => {
+                      const next = [...players];
+                      next[i] = e.target.value;
+                      setPlayers(next);
+                    }}
+                    onBlur={() => { editingPlayers.current = false; patch({ players }); }}
+                    placeholder={`Player ${i + 1}`}
+                    style={{ ...styles.input, ...(!isAdmin ? styles.inputDisabled : {}) }}
+                  />
+                </div>
+              ))}
+            </div>
+
+            {isAdmin ? (
+              <button style={styles.primaryBtnLg} onClick={shuffleTeams}>Shuffle into doubles teams →</button>
+            ) : (
+              <p style={styles.muted}>Sign in as admin to edit names or shuffle teams.</p>
+            )}
+          </section>
+        )}
+
+        {tab === "teams" && (
+          <section>
+            <div style={styles.sectionHead}>
+              <h2 style={styles.h2}>Doubles teams</h2>
+              {isAdmin && teams.length > 0 && <button style={styles.linkBtn} onClick={shuffleTeams}>Reshuffle</button>}
+            </div>
+            {teams.length === 0 ? (
+              <p style={styles.muted}>No teams yet — go to Players and shuffle first.</p>
+            ) : (
+              <>
+                <div style={styles.teamGrid}>
+                  {teams.map((t, i) => (
+                    <div key={t.id} style={styles.teamCard}>
+                      <div style={styles.teamNum}>T{i + 1}</div>
+                      <div style={styles.teamNames}>
+                        <div>{t.p1}</div>
+                        <div style={styles.teamAmp}>&amp;</div>
+                        <div>{t.p2}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <button style={styles.primaryBtnLg} onClick={() => setTab("schedule")}>Build the schedule →</button>
+              </>
+            )}
+          </section>
+        )}
+
+        {tab === "schedule" && (
+          <section>
+            {teams.length < MIN_TEAMS ? (
+              <p style={styles.muted}>Generate at least 2 teams first.</p>
+            ) : (
+              <>
+                <div style={styles.formatNote}>
+                  Round 1 &amp; 2: everyone plays both, guaranteed (odd team counts get one bye per round). Top {playoffSize || "N"} records advance to a single-elimination playoff.
+                </div>
+
+                {isAdmin && (
+                  <div style={styles.timeCard}>
+                    <div style={styles.timeRow}>
+                      <span>Minutes per match</span>
+                      <input
+                        type="number" min={5} max={60} value={minutesPerMatch}
+                        onChange={(e) => { const v = Number(e.target.value) || 15; setMinutesPerMatch(v); patch({ minutesPerMatch: v }); }}
+                        style={styles.miniInput}
+                      />
+                    </div>
+                    <div style={styles.timeRow}>
+                      <span>Est. total time ({courtCount} courts, sequential rounds)</span>
+                      <strong style={{ color: timeEstimate.totalMinutes > 120 ? "#B4483A" : "#0F5257" }}>
+                        {Math.round(timeEstimate.totalMinutes / 60 * 10) / 10}h ({timeEstimate.totalMinutes}m)
+                      </strong>
+                    </div>
+                    {timeEstimate.totalMinutes > 120 && (
+                      <div style={styles.warnLine}>Over your 2-hour window — consider shorter matches or more courts.</div>
+                    )}
+                  </div>
+                )}
+
+                <div style={styles.roundTabs}>
+                  {stages.map((s) => (
+                    <button
+                      key={s.key}
+                      onClick={() => !s.locked && setStageTab(s.key)}
+                      disabled={s.locked}
+                      style={{ ...styles.roundTabBtn, ...(stageTab === s.key ? styles.roundTabBtnActive : {}), ...(s.locked ? styles.roundTabBtnLocked : {}) }}
+                    >
+                      {s.locked ? `🔒 ${s.label}` : s.label}
+                    </button>
+                  ))}
+                </div>
+
+                <div style={styles.matchList}>
+                  {activeStage.locked && (
+                    <p style={styles.muted}>
+                      {activeStage.key === "r2" && "Unlocks once all Round 1 matches have a recorded winner."}
+                      {activeStage.key === "po_pending" && `Unlocks once Round 1 and Round 2 are both complete — top ${playoffSize} records advance.`}
+                    </p>
+                  )}
+                  {!activeStage.locked && activeStage.bye && (
+                    <div style={styles.byeCard}>🎟️ <strong>{teamLabel(activeStage.bye)}</strong> — bye this round, advances automatically</div>
+                  )}
+                  {!activeStage.locked && activeStage.matches.length === 0 && !activeStage.bye && (
+                    <p style={styles.muted}>No matches in this round.</p>
+                  )}
+                  {!activeStage.locked && activeStage.matches.map((g) => {
+                    if (g.status === "pending") return <div key={g.id} style={styles.pendingCard}>Waiting on earlier matches</div>;
+                    const court = courtAssignments[g.id];
+                    const winnerSide = winnersMapFor(activeStage.bucket)[g.id];
+                    return (
+                      <div key={g.id} style={styles.matchCard}>
+                        <div style={styles.matchMeta}>
+                          {court && <span style={styles.courtTag}>Court {court.court} · Wave {court.wave}</span>}
+                          {isAdmin && court && (
+                            <span style={styles.courtOverrideRow}>
+                              <select
+                                value={courtOverrides[g.id] || ""}
+                                onChange={(e) => setCourtOverride(g.id, e.target.value ? Number(e.target.value) : null)}
+                                style={styles.courtSelect}
+                              >
+                                <option value="">Auto (Court {court.auto})</option>
+                                {Array.from({ length: courtCount }, (_, i) => i + 1).map((c) => (
+                                  <option key={c} value={c}>Move to Court {c}</option>
+                                ))}
+                              </select>
+                            </span>
+                          )}
+                        </div>
+                        <div style={styles.matchTeams}>
+                          <button
+                            onClick={() => isAdmin && setStageWinner(activeStage.bucket, g.id, "A")}
+                            style={{ ...styles.sideBtn, ...(winnerSide === "A" ? styles.sideBtnWin : {}), ...(!isAdmin ? styles.sideBtnReadOnly : {}) }}
+                          >
+                            {teamLabel(g.a)}
+                          </button>
+                          <div style={styles.vs}>vs</div>
+                          <button
+                            onClick={() => isAdmin && setStageWinner(activeStage.bucket, g.id, "B")}
+                            style={{ ...styles.sideBtn, ...(winnerSide === "B" ? styles.sideBtnWin : {}), ...(!isAdmin ? styles.sideBtnReadOnly : {}) }}
+                          >
+                            {teamLabel(g.b)}
+                          </button>
+                        </div>
+                        {isAdmin ? (
+                          <div style={styles.scoreRow}>
+                            <input
+                              key={g.id + "_" + (matchScores[g.id] || "")}
+                              defaultValue={matchScores[g.id] || ""}
+                              placeholder="Score (e.g. 21-15)"
+                              onBlur={(e) => setScore(g.id, e.target.value)}
+                              style={styles.scoreInput}
+                            />
+                          </div>
+                        ) : (
+                          matchScores[g.id] && <div style={styles.scoreDisplay}>Score: {matchScores[g.id]}</div>
+                        )}
+                        {winnerSide && isAdmin && <div style={styles.winnerNote}>Tap the other team to change the result</div>}
+                        {!winnerSide && !isAdmin && <div style={styles.winnerNote}>Result pending</div>}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {champion && <div style={styles.championCard}>🏆 Champions: {teamLabel(champion)}</div>}
+              </>
+            )}
+          </section>
+        )}
+
+        {tab === "standings" && (
+          <section>
+            <h2 style={styles.h2}>Standings</h2>
+            {teams.length === 0 ? (
+              <p style={styles.muted}>Generate teams first.</p>
+            ) : (
+              <div style={styles.standingsList}>
+                {[...records].sort((a, b) => b.wins - a.wins).map(({ team, wins, losses }) => {
+                  const inPlayoffs = playoffSeeding && playoffSeeding.some((t) => t.id === team.id);
+                  return (
+                    <div key={team.id} style={styles.standRow}>
+                      <span>{teamLabel(team)}</span>
+                      <span style={styles.recordText}>{wins}-{losses}</span>
+                      <span style={{ ...styles.statusPill, ...(playoffSeeding ? (inPlayoffs ? styles.pillAlive : styles.pillOut) : styles.pillLB) }}>
+                        {playoffSeeding ? (inPlayoffs ? "Playoffs" : "Round robin done") : "Round robin"}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        )}
+      </main>
+
+      {toast && <div style={styles.toast}>{toast}</div>}
+    </div>
+  );
+}
+
+const styles = {
+  app: { fontFamily: "'Inter', sans-serif", background: "#F7F5EE", minHeight: "100vh", color: "#16211F", paddingBottom: 40 },
+  header: { position: "relative", padding: "20px 20px 16px", overflow: "hidden" },
+  headerLine: { position: "absolute", top: 0, left: 0, right: 0, height: 6, background: "linear-gradient(90deg,#0F5257,#C4D93B)" },
+  headerRow: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginTop: 10, gap: 10 },
+  eyebrow: { fontFamily: "'JetBrains Mono', monospace", fontSize: 11, letterSpacing: 1.5, color: "#0F5257", fontWeight: 700 },
+  h1: { fontFamily: "'Oswald', sans-serif", fontSize: 22, fontWeight: 700, margin: "4px 0 0", letterSpacing: 0.3, textTransform: "uppercase" },
+  eventNameInput: { fontFamily: "'Oswald', sans-serif", fontSize: 20, fontWeight: 700, margin: "4px 0 0", letterSpacing: 0.3, textTransform: "uppercase", border: "1px solid #E4E0D2", borderRadius: 6, padding: "4px 8px", width: "100%", background: "#fff" },
+  courtBadge: { background: "#16211F", color: "#C4D93B", fontFamily: "'JetBrains Mono', monospace", fontSize: 11, fontWeight: 700, padding: "6px 10px", borderRadius: 6, whiteSpace: "nowrap" },
+  adminPillOn: { background: "#C4D93B", color: "#16211F", border: "none", fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, fontWeight: 700, padding: "5px 9px", borderRadius: 6, whiteSpace: "nowrap" },
+  adminPillOff: { background: "transparent", color: "#6C7A76", border: "1px solid #E4E0D2", fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, fontWeight: 700, padding: "5px 9px", borderRadius: 6, whiteSpace: "nowrap" },
+  pinRow: { display: "flex", gap: 8, marginTop: 10 },
+  pinInput: { flex: 1, border: "1px solid #E4E0D2", borderRadius: 8, padding: "9px 10px", fontSize: 14, background: "#fff" },
+  viewBanner: { background: "#FBF3D9", color: "#8A6D1B", fontSize: 12.5, fontWeight: 600, padding: "9px 16px", lineHeight: 1.4 },
+  errorBanner: { background: "#F5E4E1", color: "#8A3A2E", fontSize: 12.5, fontWeight: 600, padding: "9px 16px", lineHeight: 1.4 },
+  findBar: { padding: "12px 16px 0" },
+  findInput: { width: "100%", border: "1px solid #E4E0D2", borderRadius: 10, padding: "11px 12px", fontSize: 14, background: "#fff" },
+  findResults: { marginTop: 8, display: "flex", flexDirection: "column", gap: 6 },
+  findEmpty: { fontSize: 13, color: "#6C7A76", padding: "6px 2px" },
+  findCard: { background: "#16211F", color: "#F7F5EE", borderRadius: 10, padding: "10px 12px" },
+  findStage: { fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "#C4D93B", fontWeight: 700, marginBottom: 4, textTransform: "uppercase" },
+  findLine: { fontSize: 13.5 },
+  findMeta: { display: "flex", gap: 8, marginTop: 6, alignItems: "center" },
+  findStatus: { fontSize: 11.5, color: "#C7C4B4" },
+  tabs: { display: "flex", gap: 6, padding: "12px 16px 12px", overflowX: "auto" },
+  tabBtn: { border: "1px solid #E4E0D2", background: "#fff", color: "#6C7A76", fontSize: 13, fontWeight: 600, padding: "8px 14px", borderRadius: 20, whiteSpace: "nowrap" },
+  tabBtnActive: { background: "#0F5257", color: "#fff", border: "1px solid #0F5257" },
+  main: { padding: "8px 16px 0" },
+  sectionHead: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 },
+  h2: { fontFamily: "'Oswald', sans-serif", fontSize: 19, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.3, margin: 0 },
+  linkBtn: { background: "none", border: "none", color: "#0F5257", fontWeight: 700, fontSize: 13, textDecoration: "underline" },
+  muted: { color: "#6C7A76", fontSize: 14 },
+  mutedSmall: { color: "#6C7A76", fontSize: 12, marginTop: 8, marginBottom: 0, lineHeight: 1.4 },
+  card: { background: "#fff", border: "1px solid #E4E0D2", borderRadius: 12, padding: 14, marginBottom: 14 },
+  settingsRow: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0" },
+  settingsLabel: { fontSize: 13.5, fontWeight: 600 },
+  stepper: { display: "flex", alignItems: "center", gap: 6 },
+  stepperBtn: { width: 30, height: 30, border: "1px solid #E4E0D2", background: "#F7F5EE", borderRadius: 6, fontSize: 16, fontWeight: 700, color: "#0F5257" },
+  stepperInput: { width: 50, textAlign: "center", border: "1px solid #E4E0D2", borderRadius: 6, padding: "5px 4px", fontSize: 14 },
+  textarea: { width: "100%", border: "1px solid #E4E0D2", borderRadius: 8, padding: 10, fontSize: 14, resize: "vertical", marginBottom: 10 },
+  playerGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 16 },
+  playerRow: { display: "flex", alignItems: "center", gap: 6, background: "#fff", border: "1px solid #E4E0D2", borderRadius: 8, padding: "6px 8px" },
+  playerNum: { fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "#6C7A76", width: 20 },
+  input: { border: "none", outline: "none", fontSize: 14, flex: 1, minWidth: 0, background: "transparent" },
+  inputDisabled: { background: "#F1F0E6", color: "#A8A99C" },
+  primaryBtnLg: { width: "100%", background: "#0F5257", color: "#fff", border: "none", borderRadius: 10, padding: "14px", fontSize: 15, fontWeight: 700, fontFamily: "'Oswald', sans-serif", textTransform: "uppercase", letterSpacing: 0.5 },
+  primaryBtn: { background: "#0F5257", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13, fontWeight: 700 },
+  teamGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16 },
+  teamCard: { background: "#fff", border: "1px solid #E4E0D2", borderRadius: 10, padding: 12, position: "relative" },
+  teamNum: { position: "absolute", top: 8, right: 10, fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "#C4D93B", background: "#16211F", padding: "2px 6px", borderRadius: 4, fontWeight: 700 },
+  teamNames: { fontSize: 14, fontWeight: 600, lineHeight: 1.5 },
+  teamAmp: { color: "#0F5257", fontSize: 11, fontWeight: 700, margin: "1px 0" },
+  formatNote: { background: "#EAF3F2", color: "#0F5257", fontSize: 12.5, fontWeight: 600, padding: "10px 12px", borderRadius: 10, marginBottom: 12, lineHeight: 1.4 },
+  timeCard: { background: "#fff", border: "1px solid #E4E0D2", borderRadius: 12, padding: 14, marginBottom: 16 },
+  timeRow: { display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, padding: "4px 0" },
+  miniInput: { width: 56, border: "1px solid #E4E0D2", borderRadius: 6, padding: "4px 6px", fontSize: 13, textAlign: "center" },
+  warnLine: { marginTop: 8, fontSize: 12.5, color: "#B4483A", lineHeight: 1.5 },
+  roundTabs: { display: "flex", gap: 6, overflowX: "auto", paddingBottom: 8, marginBottom: 4 },
+  roundTabBtn: { border: "1px solid #E4E0D2", background: "#fff", color: "#6C7A76", fontSize: 12.5, fontWeight: 600, padding: "7px 12px", borderRadius: 8, whiteSpace: "nowrap" },
+  roundTabBtnActive: { background: "#16211F", color: "#C4D93B", border: "1px solid #16211F" },
+  roundTabBtnLocked: { color: "#C7C4B4", background: "#F1F0E6" },
+  matchList: { display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 },
+  matchCard: { background: "#fff", border: "1px solid #E4E0D2", borderRadius: 12, padding: 12 },
+  byeCard: { background: "#EAF3F2", color: "#0F5257", borderRadius: 10, padding: "12px 14px", fontSize: 14 },
+  matchMeta: { marginBottom: 8, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" },
+  courtTag: { fontFamily: "'JetBrains Mono', monospace", fontSize: 11, fontWeight: 700, color: "#0F5257", background: "#EAF3F2", padding: "3px 8px", borderRadius: 6 },
+  courtOverrideRow: {},
+  courtSelect: { fontSize: 11, border: "1px solid #E4E0D2", borderRadius: 6, padding: "3px 4px", color: "#6C7A76" },
+  matchTeams: { display: "flex", flexDirection: "column", gap: 6 },
+  sideBtn: { textAlign: "left", border: "1px solid #E4E0D2", background: "#F7F5EE", borderRadius: 8, padding: "10px 12px", fontSize: 14, fontWeight: 600 },
+  sideBtnWin: { background: "#0F5257", color: "#fff", border: "1px solid #0F5257" },
+  sideBtnReadOnly: { cursor: "default", opacity: 0.9 },
+  vs: { textAlign: "center", fontSize: 11, color: "#6C7A76", fontWeight: 700 },
+  scoreRow: { marginTop: 8 },
+  scoreInput: { width: "100%", border: "1px solid #E4E0D2", borderRadius: 6, padding: "6px 8px", fontSize: 12.5 },
+  scoreDisplay: { marginTop: 6, fontSize: 12, color: "#6C7A76", fontFamily: "'JetBrains Mono', monospace" },
+  winnerNote: { fontSize: 11, color: "#6C7A76", marginTop: 6 },
+  pendingCard: { background: "#F1F0E6", borderRadius: 10, padding: "10px 12px", fontSize: 13, color: "#A8A99C", fontStyle: "italic" },
+  championCard: { background: "#16211F", color: "#C4D93B", fontFamily: "'Oswald', sans-serif", fontSize: 17, fontWeight: 700, textAlign: "center", padding: 16, borderRadius: 12, textTransform: "uppercase", letterSpacing: 0.5 },
+  standingsList: { display: "flex", flexDirection: "column", gap: 8 },
+  standRow: { display: "flex", justifyContent: "space-between", alignItems: "center", background: "#fff", border: "1px solid #E4E0D2", borderRadius: 10, padding: "10px 12px", fontSize: 14, fontWeight: 600, gap: 8 },
+  recordText: { fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: "#6C7A76", fontWeight: 700 },
+  statusPill: { fontSize: 11, fontWeight: 700, padding: "4px 8px", borderRadius: 20, whiteSpace: "nowrap" },
+  pillAlive: { background: "#EAF3F2", color: "#0F5257" },
+  pillLB: { background: "#FBF3D9", color: "#8A6D1B" },
+  pillOut: { background: "#F5E4E1", color: "#B4483A" },
+  toast: { position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)", background: "#16211F", color: "#fff", padding: "10px 18px", borderRadius: 20, fontSize: 13, fontWeight: 600, zIndex: 999 },
+};
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<BadmintonApp />);
+</script>
+</body>
+</html>
