@@ -261,7 +261,7 @@ function SetupScreen() {
 function BadmintonApp() {
   const [teamCount, setTeamCount] = useState(DEFAULT_TEAM_COUNT);
   const [courtCount, setCourtCount] = useState(DEFAULT_COURT_COUNT);
-  const [eventName, setEventName] = useState("RHI Team Outing · Aug 21");
+  const [eventName, setEventName] = useState("RHI-PSCC Team Outing · Aug 21");
   const [players, setPlayers] = useState(Array.from({ length: DEFAULT_TEAM_COUNT * 2 }, () => ""));
   const [entryMode, setEntryModeState] = useState("random"); // random | manual
   const [manualTeamNames, setManualTeamNames] = useState(Array.from({ length: DEFAULT_TEAM_COUNT }, () => ({ p1: "", p2: "" })));
@@ -582,7 +582,7 @@ function BadmintonApp() {
       <header style={styles.header}>
         <div style={styles.headerLine} />
         <div style={styles.headerRow}>
-          <div style={{ minWidth: 0 }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
             <div style={styles.eyebrow}>
               {syncState === "live" ? "🟢 LIVE" : syncState === "error" ? "🔴 OFFLINE" : "🟡 CONNECTING"}
             </div>
@@ -1011,7 +1011,7 @@ function BadmintonApp() {
                   const inPlayoffs = playoffSeeding && playoffSeeding.some((t) => t.id === team.id);
                   return (
                     <div key={team.id} style={styles.standRow}>
-                      <span>{teamLabel(team)}</span>
+                      <span style={styles.standName}>{teamLabel(team)}</span>
                       <span style={styles.recordText}>{wins}-{losses}</span>
                       <span style={{ ...styles.statusPill, ...(playoffSeeding ? (inPlayoffs ? styles.pillAlive : styles.pillOut) : styles.pillLB) }}>
                         {playoffSeeding ? (inPlayoffs ? "Playoffs" : "Round robin done") : "Round robin"}
@@ -1115,9 +1115,10 @@ const styles = {
   pendingCard: { background: "#F1F0E6", borderRadius: 10, padding: "10px 12px", fontSize: 13, color: "#A8A99C", fontStyle: "italic" },
   championCard: { background: "#16211F", color: "#C4D93B", fontFamily: "'Oswald', sans-serif", fontSize: 17, fontWeight: 700, textAlign: "center", padding: 16, borderRadius: 12, textTransform: "uppercase", letterSpacing: 0.5 },
   standingsList: { display: "flex", flexDirection: "column", gap: 8 },
-  standRow: { display: "flex", justifyContent: "space-between", alignItems: "center", background: "#fff", border: "1px solid #E4E0D2", borderRadius: 10, padding: "10px 12px", fontSize: 14, fontWeight: 600, gap: 8 },
-  recordText: { fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: "#6C7A76", fontWeight: 700 },
-  statusPill: { fontSize: 11, fontWeight: 700, padding: "4px 8px", borderRadius: 20, whiteSpace: "nowrap" },
+  standRow: { display: "grid", gridTemplateColumns: "1fr 52px 130px", alignItems: "center", background: "#fff", border: "1px solid #E4E0D2", borderRadius: 10, padding: "10px 12px", fontSize: 14, fontWeight: 600, gap: 8 },
+  standName: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 },
+  recordText: { fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: "#6C7A76", fontWeight: 700, textAlign: "center" },
+  statusPill: { fontSize: 11, fontWeight: 700, padding: "4px 8px", borderRadius: 20, whiteSpace: "nowrap", justifySelf: "end" },
   pillAlive: { background: "#EAF3F2", color: "#0F5257" },
   pillLB: { background: "#FBF3D9", color: "#8A6D1B" },
   pillOut: { background: "#F5E4E1", color: "#B4483A" },
