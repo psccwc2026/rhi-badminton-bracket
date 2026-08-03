@@ -355,6 +355,25 @@ function BadmintonApp() {
     return () => unsub && unsub();
   }, []);
 
+  // Self-heal: `players` and `manualTeamNames` can each drift out of sync with
+  // `teamCount` if the count was last changed through the OTHER entry mode's
+  // bulk-paste (e.g. pasting player names in random-draw mode, then switching
+  // to "Enter teams directly" — that list was never resized to match). Once
+  // both lists are the correct length, this is a no-op.
+  useEffect(() => {
+    if (!isAdmin) return;
+    if (manualTeamNames.length !== teamCount) {
+      const next = Array.from({ length: teamCount }, (_, i) => manualTeamNames[i] || { p1: "", p2: "" });
+      setManualTeamNames(next);
+      patch({ manualTeamNames: next });
+    }
+    if (players.length !== teamCount * 2) {
+      const next = Array.from({ length: teamCount * 2 }, (_, i) => players[i] || "");
+      setPlayers(next);
+      patch({ players: next });
+    }
+  }, [isAdmin, teamCount, manualTeamNames.length, players.length]);
+
   const patch = async (obj) => {
     if (!firebaseReady) { showToast("Not connected — changes won't be saved"); return; }
     try {
@@ -433,9 +452,14 @@ function BadmintonApp() {
     const names = bulkText.split(/\n|,/).map((s) => s.trim()).filter(Boolean).slice(0, MAX_TEAMS * 2);
     const impliedTeams = Math.max(MIN_TEAMS, Math.min(MAX_TEAMS, Math.ceil(names.length / 2)));
     const next = Array.from({ length: impliedTeams * 2 }, (_, i) => names[i] || "");
+    // Also resize manualTeamNames to match, even though this is the random-draw
+    // path — otherwise switching to "Enter teams directly" later shows a list
+    // stuck at whatever length it was before this bulk paste changed teamCount.
+    const nextManual = Array.from({ length: impliedTeams }, (_, i) => manualTeamNames[i] || { p1: "", p2: "" });
     setTeamCount(impliedTeams);
     setPlayers(next);
-    patch({ teamCount: impliedTeams, players: next });
+    setManualTeamNames(nextManual);
+    patch({ teamCount: impliedTeams, players: next, manualTeamNames: nextManual });
     setBulkOpen(false);
     setBulkText("");
   };
@@ -449,9 +473,13 @@ function BadmintonApp() {
       const pair = pairs[i];
       return pair ? { p1: pair[0], p2: pair[1] } : { p1: "", p2: "" };
     });
+    // Also resize players to match, for the same reason as above — keeps the
+    // random-draw list in sync in case the admin switches modes later.
+    const nextPlayers = Array.from({ length: impliedTeams * 2 }, (_, i) => players[i] || "");
     setTeamCount(impliedTeams);
     setManualTeamNames(next);
-    patch({ teamCount: impliedTeams, manualTeamNames: next });
+    setPlayers(nextPlayers);
+    patch({ teamCount: impliedTeams, manualTeamNames: next, players: nextPlayers });
     setBulkOpen(false);
     setBulkText("");
   };
