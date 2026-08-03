@@ -1061,7 +1061,9 @@ function BadmintonApp() {
                     </div>
                   ))}
                 </div>
-                <button style={styles.primaryBtnLg} onClick={() => setTab("schedule")}>Build the schedule →</button>
+                <button style={styles.primaryBtnLg} onClick={() => setTab("schedule")}>
+                  {isAdmin ? "Build the schedule →" : "View the schedule →"}
+                </button>
               </>
             )}
           </section>
