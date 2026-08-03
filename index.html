@@ -321,6 +321,34 @@ function BadmintonApp() {
   const editingPlayers = useRef(false);
   const editingManual = useRef(false);
 
+  // Guards the same class of race for match-level fields (scores, winners,
+  // court overrides) that `editingPlayers`/`editingManual` guard for the two
+  // text fields above: a remote Firestore snapshot can, in principle, echo
+  // back with a version of the doc that predates a write still in flight
+  // (e.g. two writes to the same match landing in quick succession — typing
+  // both scores of a match within the same second). Without this, that stale
+  // echo would call setMatchScores/etc with the older value and wipe out
+  // what was just typed. Per-id (not a single blanket flag) so entering one
+  // match's score never blocks a remote update to a *different* match.
+  const pendingEdits = useRef({ matchScores: {}, round1Winners: {}, round2Winners: {}, playoffWinners: {}, courtOverrides: {} });
+  const markPending = (field, id) => {
+    const m = pendingEdits.current[field];
+    m[id] = (m[id] || 0) + 1;
+  };
+  const clearPending = (field, id) => {
+    const m = pendingEdits.current[field];
+    const n = (m[id] || 1) - 1;
+    if (n <= 0) delete m[id]; else m[id] = n;
+  };
+  const mergeGuarded = (field, remoteMap, localMap) => {
+    const pending = pendingEdits.current[field];
+    const merged = { ...remoteMap };
+    Object.keys(pending).forEach((id) => {
+      if (pending[id] && localMap[id] !== undefined) merged[id] = localMap[id];
+    });
+    return merged;
+  };
+
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 2000); };
 
   // ---- remote sync ----
@@ -333,11 +361,11 @@ function BadmintonApp() {
     if (typeof data.entryMode === "string") setEntryModeState(data.entryMode);
     if (data.manualTeamNames && !editingManual.current) setManualTeamNames(data.manualTeamNames);
     if (data.teams) setTeams(data.teams);
-    if (data.round1Winners) setRound1Winners(data.round1Winners);
-    if (data.round2Winners) setRound2Winners(data.round2Winners);
-    if (data.playoffWinners) setPlayoffWinners(data.playoffWinners);
-    if (data.matchScores) setMatchScores(data.matchScores);
-    if (data.courtOverrides) setCourtOverrides(data.courtOverrides);
+    if (data.round1Winners) setRound1Winners((prev) => mergeGuarded("round1Winners", data.round1Winners, prev));
+    if (data.round2Winners) setRound2Winners((prev) => mergeGuarded("round2Winners", data.round2Winners, prev));
+    if (data.playoffWinners) setPlayoffWinners((prev) => mergeGuarded("playoffWinners", data.playoffWinners, prev));
+    if (data.matchScores) setMatchScores((prev) => mergeGuarded("matchScores", data.matchScores, prev));
+    if (data.courtOverrides) setCourtOverrides((prev) => mergeGuarded("courtOverrides", data.courtOverrides, prev));
     if (typeof data.minutesPerMatch === "number") setMinutesPerMatch(data.minutesPerMatch);
   };
 
@@ -664,7 +692,8 @@ function BadmintonApp() {
     const field = bucket === "r1" ? "round1Winners" : bucket === "r2" ? "round2Winners" : "playoffWinners";
     const setter = bucket === "r1" ? setRound1Winners : bucket === "r2" ? setRound2Winners : setPlayoffWinners;
     setter((prev) => ({ ...prev, [matchId]: side }));
-    patch({ [field]: { [matchId]: side } });
+    markPending(field, matchId);
+    patch({ [field]: { [matchId]: side } }).finally(() => clearPending(field, matchId));
   };
 
   // Score is stored per match as { a: <points side A>, b: <points side B> } so
@@ -684,7 +713,8 @@ function BadmintonApp() {
       const existing = prev[matchId];
       const base = existing && typeof existing === "object" ? existing : { a: null, b: null };
       const nextEntry = { ...base, [side]: val };
-      patch({ matchScores: { [matchId]: nextEntry } });
+      markPending("matchScores", matchId);
+      patch({ matchScores: { [matchId]: nextEntry } }).finally(() => clearPending("matchScores", matchId));
       if (isValidScorePair(nextEntry)) {
         const winSide = nextEntry.a > nextEntry.b ? "A" : "B";
         setStageWinner(bucket, matchId, winSide);
@@ -728,7 +758,8 @@ function BadmintonApp() {
   const setCourtOverride = (matchId, courtNum) => {
     const next = { ...courtOverrides, [matchId]: courtNum };
     setCourtOverrides(next);
-    patch({ courtOverrides: { [matchId]: courtNum } });
+    markPending("courtOverrides", matchId);
+    patch({ courtOverrides: { [matchId]: courtNum } }).finally(() => clearPending("courtOverrides", matchId));
   };
 
   // court auto-assignment: round-robin per stage among "ready"/"done" matches,
