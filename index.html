@@ -117,7 +117,11 @@ function getRound2(round1Resolved) {
   if (r1matches.some((m) => m.status !== "done")) return { matches: [], bye: null };
 
   const winners = r1matches.map((m) => m.winner);
-  if (r1bye) winners.push(r1bye);
+  // Put the round-1 bye team at the FRONT of the winners pool, not the back —
+  // otherwise they can end up as the round-2 leftover too and get a second
+  // consecutive bye (a bye only exists when team count is odd and >= 3, so
+  // there's always a real match-winner available to take the leftover slot).
+  if (r1bye) winners.unshift(r1bye);
   const losers = r1matches.map((m) => m.loser);
 
   const matches = [];
