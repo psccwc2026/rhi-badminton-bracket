@@ -1,15 +1,16 @@
 # RHI Badminton Bracket — Setup Guide
 
 This turns `index.html` into a live, mobile-friendly page anyone can open — with
-one admin (PIN-protected) editing scores/courts, and everyone else seeing a
-read-only view that updates instantly, no refresh needed.
+one admin (password-protected, real server-side auth) editing scores/courts,
+and everyone else seeing a read-only view that updates instantly, no refresh
+needed.
 
-Two things to set up, both free: **Firebase** (holds the live tournament data)
-and **GitHub Pages** (hosts the page itself).
+Two things to set up, both free: **Firebase** (holds the live tournament data
+and the admin login) and **GitHub Pages** (hosts the page itself).
 
 ---
 
-## Part 1 — Firebase (real-time database)
+## Part 1 — Firebase (real-time database + admin login)
 
 1. Go to [console.firebase.google.com](https://console.firebase.google.com) and sign in with a Google account.
 2. Click **Add project** → name it anything (e.g. `rhi-badminton`) → you can disable Google Analytics for this project → **Create project**.
@@ -22,26 +23,24 @@ and **GitHub Pages** (hosts the page itself).
      match /databases/{database}/documents {
        match /tournaments/{tournamentId} {
          allow read: if true;
-         allow write: if true;
+         allow write: if request.auth != null;
        }
      }
    }
    ```
 
-   **Note on security:** this makes the tournament doc writable by anyone who has the page's Firebase config (which is visible in the page source — that's normal for Firebase web apps). The admin PIN in the app is a soft gate for your organizers, not a hard security wall. That's an appropriate tradeoff for a casual internal event; it is *not* appropriate for sensitive data. Click **Publish** to save the rules.
-5. Go to **Project settings** (gear icon, top left) → scroll to **Your apps** → click the **`</>`** (Web) icon → give it a nickname (e.g. `bracket-page`) → **Register app**. Don't bother with Firebase Hosting when prompted — you're using GitHub Pages instead.
-6. Copy the `firebaseConfig` object shown (it looks like the block below) — you'll need it in Part 2.
-
-   ```js
-   const firebaseConfig = {
-     apiKey: "AIza...",
-     authDomain: "rhi-badminton-xxxx.firebaseapp.com",
-     projectId: "rhi-badminton-xxxx",
-     storageBucket: "rhi-badminton-xxxx.appspot.com",
-     messagingSenderId: "...",
-     appId: "..."
-   };
-   ```
+   Click **Publish** to save the rules. Reads stay open to everyone (that's the
+   read-only view participants see); writes now require a real signed-in
+   session — this check happens on Firebase's servers, so it can't be
+   bypassed from the browser, unlike a client-side PIN.
+5. Go to **Build → Authentication** → **Get started** → choose **Email/Password**
+   → toggle it **Enable** → **Save**.
+6. Go to the **Users** tab → **Add user** → enter any email-shaped identifier
+   (it never needs to receive real mail, e.g. `admin@yourevent.app`) and a
+   strong password. This is the one admin login for the tournament — anyone
+   who needs edit access uses this same email/password.
+7. Go to **Project settings** (gear icon, top left) → scroll to **Your apps** → click the **`</>`** (Web) icon → give it a nickname (e.g. `bracket-page`) → **Register app**. Don't bother with Firebase Hosting when prompted — you're using GitHub Pages instead.
+8. Copy the `firebaseConfig` object shown — you'll need it in Part 2.
 
 That's it for Firebase — the free "Spark" plan covers this easily (way under the daily free quota for an event this size).
 
@@ -49,22 +48,7 @@ That's it for Firebase — the free "Spark" plan covers this easily (way under t
 
 ## Part 2 — Wire the config into `index.html`
 
-Open `index.html` in a text editor, find this block near the top (inside the first `<script>` tag):
-
-```js
-window.FIREBASE_CONFIG = {
-  apiKey: "PASTE_YOUR_API_KEY",
-  authDomain: "PASTE_YOUR_PROJECT.firebaseapp.com",
-  projectId: "PASTE_YOUR_PROJECT_ID",
-  storageBucket: "PASTE_YOUR_PROJECT.appspot.com",
-  messagingSenderId: "PASTE_YOUR_SENDER_ID",
-  appId: "PASTE_YOUR_APP_ID"
-};
-```
-
-Replace each `PASTE_YOUR_...` value with the matching value from the config you copied in step 6 above. Save the file.
-
-(If you'd rather not edit this by hand, send me the six values and I'll do it.)
+Open `index.html`, find the `window.FIREBASE_CONFIG` block near the top, and replace each value with the matching value from the config you copied in Part 1. Also update the `ADMIN_EMAIL` constant a bit further down to match the email you created in step 6 above (this value isn't secret — it's just an identifier, the same way the Firebase config itself is public). Save the file.
 
 ---
 
@@ -82,13 +66,13 @@ Replace each `PASTE_YOUR_...` value with the matching value from the config you 
 ## How it works day-to-day
 
 - **Everyone** opens the link → sees a read-only view that updates live as the admin records results (Firestore pushes changes instantly, no polling delay).
-- **Admin(s)** tap "Admin sign-in" and enter the PIN (default `0821`, set in `index.html` — change the `ADMIN_PIN` constant before deploying if you want a different one). Once unlocked on a device, that device stays unlocked (stored locally on that phone/laptop only).
-- Admin can: set the number of teams (up to 30) and courts, enter/paste player names, shuffle into doubles teams, record match winners and scores, and reassign any match to a different court (dropdown next to each match — useful if a court gets tied up).
-- Anyone — admin or not — can use the **"Find your match"** search bar to type their name and instantly see which match they're in, the court, and the status.
-- Round 1 and Round 2 guarantee everyone plays twice (odd team counts get one bye per round, marked clearly). Top teams by record then advance to a single-elimination playoff.
+- **Admin(s)** tap "Admin sign-in" and enter the password set up in Part 1. This is a real login checked by Firebase's servers, not a client-side PIN — it can't be bypassed via browser dev tools or by editing local storage. Firebase keeps the session signed in across reloads on its own.
+- Admin can: set the number of teams (up to 30) and courts, enter/paste player names (or enter pre-decided doubles pairs directly), shuffle into doubles teams, record match winners and scores (auto-derived from entered points — no separate manual winner click needed), and reassign any match to a different court.
+- Anyone — admin or not — can use the **"Find your match"** search bar to type their name and instantly see which match they're in, the court, and the status, and can tap any team in Standings for a round-by-round explanation of why they advanced (or didn't).
+- Round 1 and Round 2 guarantee everyone plays twice (odd team counts get one bye per round, marked clearly). Top teams by record (wins, then point differential) then advance to a single-elimination playoff.
 
 ## Changing things later
 
-- **Multiple events**: change `window.TOURNAMENT_ID` in `index.html` to a new value (e.g. `"rhi-nov-outing"`) to start a fresh bracket in the same Firebase project without touching old data.
-- **Admin PIN**: edit the `ADMIN_PIN` constant, re-upload the file to GitHub.
+- **Multiple events**: change `window.TOURNAMENT_ID` in `index.html` to a new value (e.g. `"rhi-nov-outing"`) to start a fresh bracket in the same Firebase project without touching old data. The same admin login works across all events in the same project — no need to create a new one each time.
+- **Admin password**: change it anytime in Firebase console → Authentication → Users (click the user → reset password). No code change or redeploy needed.
 - **Reset a tournament**: in the Firebase console, go to Firestore Database → the `tournaments` collection → delete the document for your `TOURNAMENT_ID`. The app will recreate it fresh next time someone saves.

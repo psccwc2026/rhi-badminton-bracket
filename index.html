@@ -23,6 +23,7 @@
 <!-- Firebase (compat SDK — no bundler required) -->
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 </head>
 <body>
 <div id="root"></div>
@@ -61,8 +62,13 @@ Muted:       #6C7A76
 Court line:  #E4E0D2
 ------------------------------------- */
 
-const ADMIN_KEY = "rhi-badminton-admin-flag";
-const ADMIN_PIN = "0821"; // change this, then re-save/redeploy the file
+// Admin access is enforced by Firebase Authentication (email/password) —
+// Firestore security rules require request.auth != null to write, and that
+// check happens on Firebase's servers, not in this file. This identifier is
+// NOT a secret (same as FIREBASE_CONFIG below): it just tells Firebase which
+// account to attempt signing in as. The actual password lives only in the
+// Firebase console (Authentication → Users) and is never part of this file.
+const ADMIN_EMAIL = "admin@rhi-pscc-tournament.app";
 const DEFAULT_COURT_COUNT = 4;
 const DEFAULT_TEAM_COUNT = 10;
 const MAX_TEAMS = 30;
@@ -235,6 +241,7 @@ function teamLabel(t) {
 // ============================ Firebase ============================
 
 let db = null;
+let auth = null;
 let firebaseReady = false;
 let firebaseConfigMissing = true;
 try {
@@ -243,6 +250,7 @@ try {
   if (!firebaseConfigMissing) {
     firebase.initializeApp(cfg);
     db = firebase.firestore();
+    auth = firebase.auth();
     firebaseReady = true;
   }
 } catch (e) {
@@ -334,11 +342,15 @@ function BadmintonApp() {
   };
 
   useEffect(() => {
-    try {
-      if (localStorage.getItem(ADMIN_KEY) === "true") setIsAdmin(true);
-    } catch (e) {}
-
     if (!firebaseReady) { setLoaded(true); setSyncState("error"); return; }
+
+    // Admin status is driven entirely by Firebase Auth's own session state —
+    // the actual "are you allowed to write" check happens server-side, on
+    // Firestore's rules (`allow write: if request.auth != null`), not here.
+    // Firebase persists the signed-in session across reloads on its own
+    // (no localStorage flag to forge), and this listener keeps `isAdmin` in
+    // sync with reality even if the session expires or is revoked elsewhere.
+    const unsubAuth = auth.onAuthStateChanged((user) => setIsAdmin(!!user));
 
     const unsub = getDocRef().onSnapshot(
       (snap) => {
@@ -352,7 +364,7 @@ function BadmintonApp() {
         setSyncState("error");
       }
     );
-    return () => unsub && unsub();
+    return () => { unsub && unsub(); unsubAuth && unsubAuth(); };
   }, []);
 
   // Self-heal: `players` and `manualTeamNames` can each drift out of sync with
@@ -384,22 +396,32 @@ function BadmintonApp() {
     }
   };
 
-  const tryUnlock = () => {
-    if (pinInput === ADMIN_PIN) {
-      setIsAdmin(true);
+  const [unlocking, setUnlocking] = useState(false);
+
+  // Real authentication: this call goes to Firebase's servers, which check
+  // the password against the one admin account created in the Firebase
+  // console. There's no local password comparison to bypass by editing
+  // localStorage or reading this file's source — a wrong password is
+  // rejected server-side, and a correct one returns a signed session that
+  // Firestore's rules independently verify on every write.
+  const tryUnlock = async () => {
+    if (!firebaseReady) { showToast("Not connected — try again in a moment"); return; }
+    setUnlocking(true);
+    try {
+      await auth.signInWithEmailAndPassword(ADMIN_EMAIL, pinInput);
       setPinOpen(false);
       setPinInput("");
-      try { localStorage.setItem(ADMIN_KEY, "true"); } catch (e) {}
       showToast("Admin mode unlocked");
-    } else {
-      showToast("Wrong PIN");
+    } catch (e) {
+      showToast("Wrong password");
       setPinInput("");
+    } finally {
+      setUnlocking(false);
     }
   };
 
   const lockAdmin = () => {
-    setIsAdmin(false);
-    try { localStorage.setItem(ADMIN_KEY, "false"); } catch (e) {}
+    auth.signOut();
     showToast("Switched to view-only");
   };
 
@@ -800,13 +822,16 @@ function BadmintonApp() {
             <input
               value={pinInput}
               onChange={(e) => setPinInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && tryUnlock()}
-              placeholder="Enter admin PIN"
-              type="tel"
-              inputMode="numeric"
+              onKeyDown={(e) => e.key === "Enter" && !unlocking && tryUnlock()}
+              placeholder="Enter admin password"
+              type="password"
+              autoComplete="current-password"
+              disabled={unlocking}
               style={styles.pinInput}
             />
-            <button style={styles.primaryBtn} onClick={tryUnlock}>Unlock</button>
+            <button style={styles.primaryBtn} onClick={tryUnlock} disabled={unlocking}>
+              {unlocking ? "Checking…" : "Unlock"}
+            </button>
           </div>
         )}
       </header>
