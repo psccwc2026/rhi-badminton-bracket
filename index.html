@@ -514,20 +514,15 @@ function BadmintonApp() {
 
   const winnersMapFor = (bucket) => (bucket === "r1" ? round1Winners : bucket === "r2" ? round2Winners : playoffWinners);
 
+  // Functional updater form throughout — the reconciliation pass below can call
+  // this for several matches in the same tick, and reading e.g. `round1Winners`
+  // from the outer closure in that case would drop all but the last correction
+  // (the same stale-closure hazard fixed earlier for score entry).
   const setStageWinner = (bucket, matchId, side) => {
-    if (bucket === "r1") {
-      const next = { ...round1Winners, [matchId]: side };
-      setRound1Winners(next);
-      patch({ round1Winners: { [matchId]: side } });
-    } else if (bucket === "r2") {
-      const next = { ...round2Winners, [matchId]: side };
-      setRound2Winners(next);
-      patch({ round2Winners: { [matchId]: side } });
-    } else {
-      const next = { ...playoffWinners, [matchId]: side };
-      setPlayoffWinners(next);
-      patch({ playoffWinners: { [matchId]: side } });
-    }
+    const field = bucket === "r1" ? "round1Winners" : bucket === "r2" ? "round2Winners" : "playoffWinners";
+    const setter = bucket === "r1" ? setRound1Winners : bucket === "r2" ? setRound2Winners : setPlayoffWinners;
+    setter((prev) => ({ ...prev, [matchId]: side }));
+    patch({ [field]: { [matchId]: side } });
   };
 
   // Score is stored per match as { a: <points side A>, b: <points side B> } so
@@ -559,6 +554,27 @@ function BadmintonApp() {
       return { ...prev, [matchId]: nextEntry };
     });
   };
+
+  // Self-heal existing data: a match may already have a stored winner that
+  // disagrees with its score — either it predates this auto-derive logic, or
+  // it was set by a manual click before a score existed. Whenever the derived
+  // and stored winners disagree, correct the stored one so the score is always
+  // authoritative (admin-only, so viewers never trigger writes).
+  useEffect(() => {
+    if (!isAdmin) return;
+    const reconcileStage = (bucket, matches) => {
+      const winners = winnersMapFor(bucket);
+      matches.forEach((m) => {
+        const s = matchScores[m.id];
+        if (!isValidScorePair(s)) return;
+        const derivedSide = s.a > s.b ? "A" : "B";
+        if (winners[m.id] !== derivedSide) setStageWinner(bucket, m.id, derivedSide);
+      });
+    };
+    reconcileStage("r1", round1Resolved.matches);
+    reconcileStage("r2", round2Resolved.matches);
+    playoffRounds.forEach((r) => reconcileStage("playoff", r.matches));
+  }, [isAdmin, matchScores, round1Resolved, round2Resolved, playoffRounds]);
 
   // Best-effort migration for scores entered before this field was split in two
   // (e.g. "21-15") — used only to prefill the two new inputs, never to auto-save.
