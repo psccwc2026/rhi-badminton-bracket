@@ -532,7 +532,12 @@ function BadmintonApp() {
 
   // Score is stored per match as { a: <points side A>, b: <points side B> } so
   // point differential can be computed unambiguously (see computeStandings).
-  const setScoreSide = (matchId, side, rawValue) => {
+  // The score is the single source of truth for who won: once both sides have
+  // a valid, non-tied score, the winner is derived from it automatically —
+  // this is what prevents the score and the winner-click ever disagreeing.
+  const isValidScorePair = (s) => s && typeof s === "object" && Number.isFinite(s.a) && Number.isFinite(s.b) && s.a !== s.b;
+
+  const setScoreSide = (bucket, matchId, side, rawValue, teamA, teamB) => {
     const n = rawValue === "" ? null : Number(rawValue);
     const val = Number.isFinite(n) ? n : null;
     // Use the functional updater form — the two score inputs (side A / side B)
@@ -543,6 +548,14 @@ function BadmintonApp() {
       const base = existing && typeof existing === "object" ? existing : { a: null, b: null };
       const nextEntry = { ...base, [side]: val };
       patch({ matchScores: { [matchId]: nextEntry } });
+      if (isValidScorePair(nextEntry)) {
+        const winSide = nextEntry.a > nextEntry.b ? "A" : "B";
+        setStageWinner(bucket, matchId, winSide);
+        const winnerTeam = winSide === "A" ? teamA : teamB;
+        if (winnerTeam) showToast(`Winner set to ${teamLabel(winnerTeam)} (${nextEntry.a}-${nextEntry.b})`);
+      } else if (existing && typeof existing === "object" && existing.a === existing.b && val !== null) {
+        showToast("Scores can't be tied — double check the numbers");
+      }
       return { ...prev, [matchId]: nextEntry };
     });
   };
@@ -999,54 +1012,54 @@ function BadmintonApp() {
                             </span>
                           )}
                         </div>
-                        <div style={styles.matchTeams}>
-                          <button
-                            onClick={() => isAdmin && setStageWinner(activeStage.bucket, g.id, "A")}
-                            style={{ ...styles.sideBtn, ...(winnerSide === "A" ? styles.sideBtnWin : {}), ...(!isAdmin ? styles.sideBtnReadOnly : {}) }}
-                          >
-                            {teamLabel(g.a)}
-                          </button>
-                          <div style={styles.vs}>vs</div>
-                          <button
-                            onClick={() => isAdmin && setStageWinner(activeStage.bucket, g.id, "B")}
-                            style={{ ...styles.sideBtn, ...(winnerSide === "B" ? styles.sideBtnWin : {}), ...(!isAdmin ? styles.sideBtnReadOnly : {}) }}
-                          >
-                            {teamLabel(g.b)}
-                          </button>
-                        </div>
-                        {isAdmin ? (() => {
+                        {(() => {
                           const existing = matchScores[g.id];
                           const struct = existing && typeof existing === "object" ? existing : parseLegacyScore(existing);
+                          const hasScore = isValidScorePair(struct);
+                          const rows = [
+                            { side: "A", team: g.a, val: struct.a },
+                            { side: "B", team: g.b, val: struct.b },
+                          ];
                           return (
-                            <div style={styles.scoreRow}>
-                              <input
-                                key={g.id + "_a_" + (struct.a ?? "")}
-                                type="number" min={0} max={99}
-                                defaultValue={struct.a ?? ""}
-                                placeholder={`${g.a ? g.a.p1 : "A"} pts`}
-                                onBlur={(e) => setScoreSide(g.id, "a", e.target.value)}
-                                style={styles.scoreInputHalf}
-                              />
-                              <span style={styles.scoreDash}>–</span>
-                              <input
-                                key={g.id + "_b_" + (struct.b ?? "")}
-                                type="number" min={0} max={99}
-                                defaultValue={struct.b ?? ""}
-                                placeholder={`${g.b ? g.b.p1 : "B"} pts`}
-                                onBlur={(e) => setScoreSide(g.id, "b", e.target.value)}
-                                style={styles.scoreInputHalf}
-                              />
+                            <div style={styles.matchTeams}>
+                              {rows.map(({ side, team, val }) => {
+                                const isWinner = winnerSide === side;
+                                return (
+                                  <div key={side} style={styles.teamScoreRow}>
+                                    <button
+                                      onClick={() => isAdmin && !hasScore && setStageWinner(activeStage.bucket, g.id, side)}
+                                      disabled={!isAdmin || hasScore}
+                                      style={{ ...styles.sideBtn, ...(isWinner ? styles.sideBtnWin : {}), ...(!isAdmin || hasScore ? styles.sideBtnReadOnly : {}) }}
+                                    >
+                                      {isWinner && <span style={styles.trophyMark}>🏆 </span>}
+                                      {teamLabel(team)}
+                                    </button>
+                                    {isAdmin ? (
+                                      <input
+                                        key={g.id + "_" + side.toLowerCase() + "_" + (val ?? "")}
+                                        type="number" min={0} max={99}
+                                        defaultValue={val ?? ""}
+                                        placeholder="pts"
+                                        onBlur={(e) => setScoreSide(activeStage.bucket, g.id, side.toLowerCase(), e.target.value, g.a, g.b)}
+                                        style={styles.scoreInputInline}
+                                      />
+                                    ) : (
+                                      Number.isFinite(val) && <div style={styles.scoreDisplayInline}>{val}</div>
+                                    )}
+                                  </div>
+                                );
+                              })}
                             </div>
                           );
-                        })() : (
-                          (() => {
-                            const s = matchScores[g.id];
-                            if (!s) return null;
-                            const text = typeof s === "object" ? (Number.isFinite(s.a) && Number.isFinite(s.b) ? `${s.a}-${s.b}` : null) : s;
-                            return text ? <div style={styles.scoreDisplay}>Score: {text}</div> : null;
-                          })()
-                        )}
-                        {winnerSide && isAdmin && <div style={styles.winnerNote}>Tap the other team to change the result</div>}
+                        })()}
+                        {isAdmin && (() => {
+                          const existing = matchScores[g.id];
+                          const struct = existing && typeof existing === "object" ? existing : null;
+                          if (struct && isValidScorePair(struct)) {
+                            return <div style={styles.winnerNote}>Winner set automatically from the score — edit either score to change it</div>;
+                          }
+                          return <div style={styles.winnerNote}>Enter both scores, or tap a team to set the winner directly</div>;
+                        })()}
                         {!winnerSide && !isAdmin && <div style={styles.winnerNote}>Result pending</div>}
                       </div>
                     );
@@ -1169,13 +1182,17 @@ const styles = {
   courtOverrideRow: {},
   courtSelect: { fontSize: 11, border: "1px solid #E4E0D2", borderRadius: 6, padding: "3px 4px", color: "#6C7A76" },
   matchTeams: { display: "flex", flexDirection: "column", gap: 6 },
-  sideBtn: { textAlign: "left", border: "1px solid #E4E0D2", background: "#F7F5EE", borderRadius: 8, padding: "10px 12px", fontSize: 14, fontWeight: 600 },
+  teamScoreRow: { display: "flex", alignItems: "stretch", gap: 6 },
+  sideBtn: { flex: 1, minWidth: 0, textAlign: "left", border: "1px solid #E4E0D2", background: "#F7F5EE", borderRadius: 8, padding: "10px 12px", fontSize: 14, fontWeight: 600 },
   sideBtnWin: { background: "#0F5257", color: "#fff", border: "1px solid #0F5257" },
   sideBtnReadOnly: { cursor: "default", opacity: 0.9 },
+  trophyMark: { fontSize: 12 },
   vs: { textAlign: "center", fontSize: 11, color: "#6C7A76", fontWeight: 700 },
   scoreRow: { marginTop: 8, display: "flex", alignItems: "center", gap: 6 },
   scoreInput: { width: "100%", border: "1px solid #E4E0D2", borderRadius: 6, padding: "6px 8px", fontSize: 12.5 },
   scoreInputHalf: { flex: 1, minWidth: 0, border: "1px solid #E4E0D2", borderRadius: 6, padding: "6px 8px", fontSize: 12.5, textAlign: "center" },
+  scoreInputInline: { width: 52, flexShrink: 0, border: "1px solid #E4E0D2", borderRadius: 8, padding: "6px 4px", fontSize: 14, textAlign: "center" },
+  scoreDisplayInline: { width: 40, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 700, color: "#0F5257", fontFamily: "'JetBrains Mono', monospace" },
   scoreDash: { color: "#6C7A76", fontSize: 12, fontWeight: 700, flexShrink: 0 },
   scoreDisplay: { marginTop: 6, fontSize: 12, color: "#6C7A76", fontFamily: "'JetBrains Mono', monospace" },
   winnerNote: { fontSize: 11, color: "#6C7A76", marginTop: 6 },
