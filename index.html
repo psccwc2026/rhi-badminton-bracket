@@ -148,21 +148,39 @@ function getRound2(round1Resolved) {
   return { matches, bye };
 }
 
-function computeRecords(teams, round1Resolved, round2Resolved) {
-  const wins = {}, losses = {};
-  teams.forEach((t) => { wins[t.id] = 0; losses[t.id] = 0; });
+// A match score is stored as { a: <points side A scored>, b: <points side B scored> }.
+// Older data may still hold a plain string (e.g. "21-15") from before scores were
+// split into two fields — that's display-only and contributes 0 to point diff,
+// since which number belonged to which side isn't reliably recoverable.
+function computeStandings(teams, round1Resolved, round2Resolved, matchScores) {
+  const wins = {}, losses = {}, diff = {};
+  teams.forEach((t) => { wins[t.id] = 0; losses[t.id] = 0; diff[t.id] = 0; });
+  const scores = matchScores || {};
   const apply = (resolved) => {
     resolved.matches.forEach((m) => {
       if (m.status === "done") {
         wins[m.winner.id] = (wins[m.winner.id] || 0) + 1;
         losses[m.loser.id] = (losses[m.loser.id] || 0) + 1;
+        const s = scores[m.id];
+        if (s && typeof s === "object" && Number.isFinite(s.a) && Number.isFinite(s.b)) {
+          diff[m.a.id] = (diff[m.a.id] || 0) + (s.a - s.b);
+          diff[m.b.id] = (diff[m.b.id] || 0) + (s.b - s.a);
+        }
       }
     });
     if (resolved.bye) wins[resolved.bye.id] = (wins[resolved.bye.id] || 0) + 1;
   };
   apply(round1Resolved);
   apply(round2Resolved);
-  return teams.map((t) => ({ team: t, wins: wins[t.id] || 0, losses: losses[t.id] || 0 }));
+  return teams.map((t) => ({ team: t, wins: wins[t.id] || 0, losses: losses[t.id] || 0, diff: diff[t.id] || 0 }));
+}
+
+// Ranks teams: most wins first, then highest point differential, then original
+// draw order as the final (arbitrary, but at least transparent) tiebreak.
+function rankStandings(records) {
+  return [...records].sort(
+    (a, b) => b.wins - a.wins || b.diff - a.diff || a.team.drawOrder - b.team.drawOrder
+  );
 }
 
 function getPlayoffSize(teamCount) {
@@ -170,7 +188,7 @@ function getPlayoffSize(teamCount) {
   return teamCount >= 8 ? 8 : largestPowerOfTwoLTE(teamCount);
 }
 
-function getPlayoffSeeding(teams, round1Resolved, round2Resolved) {
+function getPlayoffSeeding(teams, round1Resolved, round2Resolved, matchScores) {
   const r1Ready = round1Resolved.matches.length > 0 || round1Resolved.bye;
   const r1Done = round1Resolved.matches.every((m) => m.status === "done");
   const r2Exists = round2Resolved.matches.length > 0 || round2Resolved.bye;
@@ -179,8 +197,8 @@ function getPlayoffSeeding(teams, round1Resolved, round2Resolved) {
 
   const size = getPlayoffSize(teams.length);
   if (size < 2) return null;
-  const records = computeRecords(teams, round1Resolved, round2Resolved);
-  const sorted = [...records].sort((a, b) => b.wins - a.wins || a.team.drawOrder - b.team.drawOrder);
+  const records = computeStandings(teams, round1Resolved, round2Resolved, matchScores);
+  const sorted = rankStandings(records);
   return sorted.slice(0, size).map((r) => r.team);
 }
 
@@ -457,11 +475,15 @@ function BadmintonApp() {
     () => ({ matches: resolveStage(round2.matches, round2Winners), bye: round2.bye }),
     [round2, round2Winners]
   );
-  const records = useMemo(() => computeRecords(teams, round1Resolved, round2Resolved), [teams, round1Resolved, round2Resolved]);
+  const records = useMemo(
+    () => computeStandings(teams, round1Resolved, round2Resolved, matchScores),
+    [teams, round1Resolved, round2Resolved, matchScores]
+  );
+  const rankedRecords = useMemo(() => rankStandings(records), [records]);
   const playoffSize = getPlayoffSize(teams.length);
   const playoffSeeding = useMemo(
-    () => getPlayoffSeeding(teams, round1Resolved, round2Resolved),
-    [teams, round1Resolved, round2Resolved]
+    () => getPlayoffSeeding(teams, round1Resolved, round2Resolved, matchScores),
+    [teams, round1Resolved, round2Resolved, matchScores]
   );
   const playoffRounds = useMemo(() => getPlayoffRounds(playoffSeeding, playoffWinners), [playoffSeeding, playoffWinners]);
   const champion = (() => {
@@ -508,10 +530,28 @@ function BadmintonApp() {
     }
   };
 
-  const setScore = (matchId, val) => {
-    const next = { ...matchScores, [matchId]: val };
-    setMatchScores(next);
-    patch({ matchScores: { [matchId]: val } });
+  // Score is stored per match as { a: <points side A>, b: <points side B> } so
+  // point differential can be computed unambiguously (see computeStandings).
+  const setScoreSide = (matchId, side, rawValue) => {
+    const n = rawValue === "" ? null : Number(rawValue);
+    const val = Number.isFinite(n) ? n : null;
+    // Use the functional updater form — the two score inputs (side A / side B)
+    // can both blur in the same tick, and reading `matchScores` from the outer
+    // closure in that case would silently drop whichever update landed first.
+    setMatchScores((prev) => {
+      const existing = prev[matchId];
+      const base = existing && typeof existing === "object" ? existing : { a: null, b: null };
+      const nextEntry = { ...base, [side]: val };
+      patch({ matchScores: { [matchId]: nextEntry } });
+      return { ...prev, [matchId]: nextEntry };
+    });
+  };
+
+  // Best-effort migration for scores entered before this field was split in two
+  // (e.g. "21-15") — used only to prefill the two new inputs, never to auto-save.
+  const parseLegacyScore = (str) => {
+    const m = typeof str === "string" ? str.match(/(\d+)\D+(\d+)/) : null;
+    return m ? { a: Number(m[1]), b: Number(m[2]) } : { a: null, b: null };
   };
 
   const setCourtOverride = (matchId, courtNum) => {
@@ -974,18 +1014,37 @@ function BadmintonApp() {
                             {teamLabel(g.b)}
                           </button>
                         </div>
-                        {isAdmin ? (
-                          <div style={styles.scoreRow}>
-                            <input
-                              key={g.id + "_" + (matchScores[g.id] || "")}
-                              defaultValue={matchScores[g.id] || ""}
-                              placeholder="Score (e.g. 21-15)"
-                              onBlur={(e) => setScore(g.id, e.target.value)}
-                              style={styles.scoreInput}
-                            />
-                          </div>
-                        ) : (
-                          matchScores[g.id] && <div style={styles.scoreDisplay}>Score: {matchScores[g.id]}</div>
+                        {isAdmin ? (() => {
+                          const existing = matchScores[g.id];
+                          const struct = existing && typeof existing === "object" ? existing : parseLegacyScore(existing);
+                          return (
+                            <div style={styles.scoreRow}>
+                              <input
+                                key={g.id + "_a_" + (struct.a ?? "")}
+                                type="number" min={0} max={99}
+                                defaultValue={struct.a ?? ""}
+                                placeholder={`${g.a ? g.a.p1 : "A"} pts`}
+                                onBlur={(e) => setScoreSide(g.id, "a", e.target.value)}
+                                style={styles.scoreInputHalf}
+                              />
+                              <span style={styles.scoreDash}>–</span>
+                              <input
+                                key={g.id + "_b_" + (struct.b ?? "")}
+                                type="number" min={0} max={99}
+                                defaultValue={struct.b ?? ""}
+                                placeholder={`${g.b ? g.b.p1 : "B"} pts`}
+                                onBlur={(e) => setScoreSide(g.id, "b", e.target.value)}
+                                style={styles.scoreInputHalf}
+                              />
+                            </div>
+                          );
+                        })() : (
+                          (() => {
+                            const s = matchScores[g.id];
+                            if (!s) return null;
+                            const text = typeof s === "object" ? (Number.isFinite(s.a) && Number.isFinite(s.b) ? `${s.a}-${s.b}` : null) : s;
+                            return text ? <div style={styles.scoreDisplay}>Score: {text}</div> : null;
+                          })()
                         )}
                         {winnerSide && isAdmin && <div style={styles.winnerNote}>Tap the other team to change the result</div>}
                         {!winnerSide && !isAdmin && <div style={styles.winnerNote}>Result pending</div>}
@@ -1006,20 +1065,26 @@ function BadmintonApp() {
             {teams.length === 0 ? (
               <p style={styles.muted}>Generate teams first.</p>
             ) : (
-              <div style={styles.standingsList}>
-                {[...records].sort((a, b) => b.wins - a.wins).map(({ team, wins, losses }) => {
-                  const inPlayoffs = playoffSeeding && playoffSeeding.some((t) => t.id === team.id);
-                  return (
-                    <div key={team.id} style={styles.standRow}>
-                      <span style={styles.standName}>{teamLabel(team)}</span>
-                      <span style={styles.recordText}>{wins}-{losses}</span>
-                      <span style={{ ...styles.statusPill, ...(playoffSeeding ? (inPlayoffs ? styles.pillAlive : styles.pillOut) : styles.pillLB) }}>
-                        {playoffSeeding ? (inPlayoffs ? "Playoffs" : "Round robin done") : "Round robin"}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
+              <>
+                <p style={styles.mutedSmall}>
+                  Ranked by wins, then point differential (from entered scores), then original draw order as a last resort.
+                </p>
+                <div style={styles.standingsList}>
+                  {rankedRecords.map(({ team, wins, losses, diff }) => {
+                    const inPlayoffs = playoffSeeding && playoffSeeding.some((t) => t.id === team.id);
+                    return (
+                      <div key={team.id} style={styles.standRow}>
+                        <span style={styles.standName}>{teamLabel(team)}</span>
+                        <span style={styles.recordText}>{wins}-{losses}</span>
+                        <span style={styles.diffText}>{diff > 0 ? `+${diff}` : diff}</span>
+                        <span style={{ ...styles.statusPill, ...(playoffSeeding ? (inPlayoffs ? styles.pillAlive : styles.pillOut) : styles.pillLB) }}>
+                          {playoffSeeding ? (inPlayoffs ? "Playoffs" : "Round robin done") : "Round robin"}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
             )}
           </section>
         )}
@@ -1108,16 +1173,19 @@ const styles = {
   sideBtnWin: { background: "#0F5257", color: "#fff", border: "1px solid #0F5257" },
   sideBtnReadOnly: { cursor: "default", opacity: 0.9 },
   vs: { textAlign: "center", fontSize: 11, color: "#6C7A76", fontWeight: 700 },
-  scoreRow: { marginTop: 8 },
+  scoreRow: { marginTop: 8, display: "flex", alignItems: "center", gap: 6 },
   scoreInput: { width: "100%", border: "1px solid #E4E0D2", borderRadius: 6, padding: "6px 8px", fontSize: 12.5 },
+  scoreInputHalf: { flex: 1, minWidth: 0, border: "1px solid #E4E0D2", borderRadius: 6, padding: "6px 8px", fontSize: 12.5, textAlign: "center" },
+  scoreDash: { color: "#6C7A76", fontSize: 12, fontWeight: 700, flexShrink: 0 },
   scoreDisplay: { marginTop: 6, fontSize: 12, color: "#6C7A76", fontFamily: "'JetBrains Mono', monospace" },
   winnerNote: { fontSize: 11, color: "#6C7A76", marginTop: 6 },
   pendingCard: { background: "#F1F0E6", borderRadius: 10, padding: "10px 12px", fontSize: 13, color: "#A8A99C", fontStyle: "italic" },
   championCard: { background: "#16211F", color: "#C4D93B", fontFamily: "'Oswald', sans-serif", fontSize: 17, fontWeight: 700, textAlign: "center", padding: 16, borderRadius: 12, textTransform: "uppercase", letterSpacing: 0.5 },
   standingsList: { display: "flex", flexDirection: "column", gap: 8 },
-  standRow: { display: "grid", gridTemplateColumns: "1fr 52px 130px", alignItems: "center", background: "#fff", border: "1px solid #E4E0D2", borderRadius: 10, padding: "10px 12px", fontSize: 14, fontWeight: 600, gap: 8 },
+  standRow: { display: "grid", gridTemplateColumns: "1fr 46px 50px 130px", alignItems: "center", background: "#fff", border: "1px solid #E4E0D2", borderRadius: 10, padding: "10px 12px", fontSize: 14, fontWeight: 600, gap: 8 },
   standName: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 },
   recordText: { fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: "#6C7A76", fontWeight: 700, textAlign: "center" },
+  diffText: { fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: "#0F5257", fontWeight: 700, textAlign: "center" },
   statusPill: { fontSize: 11, fontWeight: 700, padding: "4px 8px", borderRadius: 20, whiteSpace: "nowrap", justifySelf: "end" },
   pillAlive: { background: "#EAF3F2", color: "#0F5257" },
   pillLB: { background: "#FBF3D9", color: "#8A6D1B" },
