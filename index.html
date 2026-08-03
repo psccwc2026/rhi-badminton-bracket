@@ -259,6 +259,8 @@ function BadmintonApp() {
   const [courtCount, setCourtCount] = useState(DEFAULT_COURT_COUNT);
   const [eventName, setEventName] = useState("RHI Team Outing · Aug 21");
   const [players, setPlayers] = useState(Array.from({ length: DEFAULT_TEAM_COUNT * 2 }, () => ""));
+  const [entryMode, setEntryModeState] = useState("random"); // random | manual
+  const [manualTeamNames, setManualTeamNames] = useState(Array.from({ length: DEFAULT_TEAM_COUNT }, () => ({ p1: "", p2: "" })));
   const [teams, setTeams] = useState([]);
   const [round1Winners, setRound1Winners] = useState({});
   const [round2Winners, setRound2Winners] = useState({});
@@ -279,6 +281,7 @@ function BadmintonApp() {
   const [findQuery, setFindQuery] = useState("");
   const [syncState, setSyncState] = useState("connecting"); // connecting | live | error
   const editingPlayers = useRef(false);
+  const editingManual = useRef(false);
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 2000); };
 
@@ -289,6 +292,8 @@ function BadmintonApp() {
     if (typeof data.courtCount === "number") setCourtCount(data.courtCount);
     if (typeof data.eventName === "string") setEventName(data.eventName);
     if (data.players && !editingPlayers.current) setPlayers(data.players);
+    if (typeof data.entryMode === "string") setEntryModeState(data.entryMode);
+    if (data.manualTeamNames && !editingManual.current) setManualTeamNames(data.manualTeamNames);
     if (data.teams) setTeams(data.teams);
     if (data.round1Winners) setRound1Winners(data.round1Winners);
     if (data.round2Winners) setRound2Winners(data.round2Winners);
@@ -353,12 +358,27 @@ function BadmintonApp() {
   const changeTeamCount = (n) => {
     const clamped = Math.max(MIN_TEAMS, Math.min(MAX_TEAMS, n || MIN_TEAMS));
     const nextPlayers = Array.from({ length: clamped * 2 }, (_, i) => players[i] || "");
+    const nextManual = Array.from({ length: clamped }, (_, i) => manualTeamNames[i] || { p1: "", p2: "" });
     setTeamCount(clamped);
     setPlayers(nextPlayers);
-    patch({ teamCount: clamped, players: nextPlayers });
+    setManualTeamNames(nextManual);
+    patch({ teamCount: clamped, players: nextPlayers, manualTeamNames: nextManual });
+  };
+
+  const changeEntryMode = (mode) => {
+    setEntryModeState(mode);
+    patch({ entryMode: mode });
   };
 
   const filledCount = players.filter((p) => p.trim()).length;
+  const manualFilledCount = manualTeamNames.filter((t) => t.p1 && t.p1.trim() && t.p2 && t.p2.trim()).length;
+
+  // Splits a pasted line like "Achal & Ashwin" / "Achal, Ashwin" / "Achal vs Ashwin"
+  // into ["Achal", "Ashwin"] for the direct team-entry paste box.
+  const parseTeamLine = (line) => {
+    const parts = line.split(/\s*(?:&|\/|,|\bvs\.?\b|\band\b|\bwith\b|-)\s*/i).map((s) => s.trim()).filter(Boolean);
+    return [parts[0] || "", parts[1] || ""];
+  };
 
   const shuffleTeams = () => {
     const names = players.map((p) => p.trim()).filter(Boolean);
@@ -388,6 +408,38 @@ function BadmintonApp() {
     patch({ teamCount: impliedTeams, players: next });
     setBulkOpen(false);
     setBulkText("");
+  };
+
+  // Bulk paste for direct team entry: one team per line, e.g. "Achal & Ashwin".
+  const applyManualBulk = () => {
+    const lines = bulkText.split(/\n/).map((l) => l.trim()).filter(Boolean).slice(0, MAX_TEAMS);
+    const pairs = lines.map(parseTeamLine);
+    const impliedTeams = Math.max(MIN_TEAMS, Math.min(MAX_TEAMS, pairs.length || teamCount));
+    const next = Array.from({ length: impliedTeams }, (_, i) => {
+      const pair = pairs[i];
+      return pair ? { p1: pair[0], p2: pair[1] } : { p1: "", p2: "" };
+    });
+    setTeamCount(impliedTeams);
+    setManualTeamNames(next);
+    patch({ teamCount: impliedTeams, manualTeamNames: next });
+    setBulkOpen(false);
+    setBulkText("");
+  };
+
+  const saveManualTeams = () => {
+    const valid = manualTeamNames.filter((t) => t.p1 && t.p1.trim());
+    if (valid.length < 2) { showToast("Enter at least 2 teams (both partner names)"); return; }
+    const newTeams = valid.map((t, i) => ({
+      id: `t${i + 1}`,
+      drawOrder: i,
+      p1: t.p1.trim(),
+      p2: (t.p2 && t.p2.trim()) || "BYE PARTNER",
+    }));
+    setTeams(newTeams);
+    setRound1Winners({}); setRound2Winners({}); setPlayoffWinners({});
+    setMatchScores({}); setCourtOverrides({});
+    patch({ teams: newTeams, round1Winners: {}, round2Winners: {}, playoffWinners: {}, matchScores: {}, courtOverrides: {} });
+    setTab("teams");
   };
 
   // ---- derived bracket state ----
@@ -613,7 +665,7 @@ function BadmintonApp() {
 
       <nav style={styles.tabs}>
         {[
-          { key: "players", label: `Players (${filledCount}/${teamCount * 2})` },
+          { key: "players", label: entryMode === "manual" ? `Setup (${manualFilledCount}/${teamCount})` : `Players (${filledCount}/${teamCount * 2})` },
           { key: "teams", label: `Teams (${teams.length})` },
           { key: "schedule", label: "Schedule" },
           { key: "standings", label: "Standings" },
@@ -628,13 +680,37 @@ function BadmintonApp() {
         {tab === "players" && (
           <section>
             <div style={styles.sectionHead}>
-              <h2 style={styles.h2}>Enter players</h2>
+              <h2 style={styles.h2}>{entryMode === "manual" ? "Enter teams directly" : "Enter players"}</h2>
               {isAdmin && (
                 <button style={styles.linkBtn} onClick={() => setBulkOpen(!bulkOpen)}>
-                  {bulkOpen ? "Close paste box" : "Paste all names"}
+                  {bulkOpen ? "Close paste box" : entryMode === "manual" ? "Paste team list" : "Paste all names"}
                 </button>
               )}
             </div>
+
+            {isAdmin && (
+              <div style={styles.modeToggleRow}>
+                <button
+                  style={{ ...styles.modeBtn, ...(entryMode === "random" ? styles.modeBtnActive : {}) }}
+                  onClick={() => changeEntryMode("random")}
+                >
+                  Random draw
+                </button>
+                <button
+                  style={{ ...styles.modeBtn, ...(entryMode === "manual" ? styles.modeBtnActive : {}) }}
+                  onClick={() => changeEntryMode("manual")}
+                >
+                  Enter teams directly
+                </button>
+              </div>
+            )}
+            {isAdmin && (
+              <p style={styles.mutedSmall}>
+                {entryMode === "manual"
+                  ? "Type each team's two partner names directly — no random shuffling. Use this when players have already picked their own partners."
+                  : "Enter every player's name, then shuffle into random doubles teams. Switch to \"Enter teams directly\" if partners are already decided."}
+              </p>
+            )}
 
             {isAdmin && (
               <div style={styles.card}>
@@ -662,11 +738,11 @@ function BadmintonApp() {
                     <button style={styles.stepperBtn} onClick={() => { const v = Math.min(12, courtCount + 1); setCourtCount(v); patch({ courtCount: v }); }}>+</button>
                   </div>
                 </div>
-                <p style={styles.mutedSmall}>Up to {MAX_TEAMS} teams supported. Changing team count resizes the name list below (existing names are kept where possible).</p>
+                <p style={styles.mutedSmall}>Up to {MAX_TEAMS} teams supported. Changing team count resizes the list below (existing names are kept where possible).</p>
               </div>
             )}
 
-            {bulkOpen && isAdmin && (
+            {bulkOpen && isAdmin && entryMode === "random" && (
               <div style={styles.card}>
                 <textarea
                   value={bulkText}
@@ -679,31 +755,89 @@ function BadmintonApp() {
               </div>
             )}
 
-            <div style={styles.playerGrid}>
-              {players.map((p, i) => (
-                <div key={i} style={styles.playerRow}>
-                  <span style={styles.playerNum}>{i + 1}</span>
-                  <input
-                    value={p}
-                    disabled={!isAdmin}
-                    onFocus={() => { editingPlayers.current = true; }}
-                    onChange={(e) => {
-                      const next = [...players];
-                      next[i] = e.target.value;
-                      setPlayers(next);
-                    }}
-                    onBlur={() => { editingPlayers.current = false; patch({ players }); }}
-                    placeholder={`Player ${i + 1}`}
-                    style={{ ...styles.input, ...(!isAdmin ? styles.inputDisabled : {}) }}
-                  />
-                </div>
-              ))}
-            </div>
+            {bulkOpen && isAdmin && entryMode === "manual" && (
+              <div style={styles.card}>
+                <textarea
+                  value={bulkText}
+                  onChange={(e) => setBulkText(e.target.value)}
+                  placeholder={"One team per line\nAchal & Ashwin\nAnnette / Barbara\nBhavan, Carrie\n..."}
+                  rows={6}
+                  style={styles.textarea}
+                />
+                <button style={styles.primaryBtn} onClick={applyManualBulk}>Fill teams (sets team count automatically)</button>
+              </div>
+            )}
 
-            {isAdmin ? (
-              <button style={styles.primaryBtnLg} onClick={shuffleTeams}>Shuffle into doubles teams →</button>
+            {entryMode === "random" ? (
+              <>
+                <div style={styles.playerGrid}>
+                  {players.map((p, i) => (
+                    <div key={i} style={styles.playerRow}>
+                      <span style={styles.playerNum}>{i + 1}</span>
+                      <input
+                        value={p}
+                        disabled={!isAdmin}
+                        onFocus={() => { editingPlayers.current = true; }}
+                        onChange={(e) => {
+                          const next = [...players];
+                          next[i] = e.target.value;
+                          setPlayers(next);
+                        }}
+                        onBlur={() => { editingPlayers.current = false; patch({ players }); }}
+                        placeholder={`Player ${i + 1}`}
+                        style={{ ...styles.input, ...(!isAdmin ? styles.inputDisabled : {}) }}
+                      />
+                    </div>
+                  ))}
+                </div>
+
+                {isAdmin ? (
+                  <button style={styles.primaryBtnLg} onClick={shuffleTeams}>Shuffle into doubles teams →</button>
+                ) : (
+                  <p style={styles.muted}>Sign in as admin to edit names or shuffle teams.</p>
+                )}
+              </>
             ) : (
-              <p style={styles.muted}>Sign in as admin to edit names or shuffle teams.</p>
+              <>
+                <div style={styles.manualTeamList}>
+                  {manualTeamNames.map((t, i) => (
+                    <div key={i} style={styles.manualTeamRow}>
+                      <span style={styles.playerNum}>T{i + 1}</span>
+                      <input
+                        value={t.p1}
+                        disabled={!isAdmin}
+                        onFocus={() => { editingManual.current = true; }}
+                        onChange={(e) => {
+                          const next = manualTeamNames.map((x, idx) => (idx === i ? { ...x, p1: e.target.value } : x));
+                          setManualTeamNames(next);
+                        }}
+                        onBlur={() => { editingManual.current = false; patch({ manualTeamNames }); }}
+                        placeholder="Partner A"
+                        style={{ ...styles.input, ...(!isAdmin ? styles.inputDisabled : {}) }}
+                      />
+                      <span style={styles.teamAmp}>&amp;</span>
+                      <input
+                        value={t.p2}
+                        disabled={!isAdmin}
+                        onFocus={() => { editingManual.current = true; }}
+                        onChange={(e) => {
+                          const next = manualTeamNames.map((x, idx) => (idx === i ? { ...x, p2: e.target.value } : x));
+                          setManualTeamNames(next);
+                        }}
+                        onBlur={() => { editingManual.current = false; patch({ manualTeamNames }); }}
+                        placeholder="Partner B"
+                        style={{ ...styles.input, ...(!isAdmin ? styles.inputDisabled : {}) }}
+                      />
+                    </div>
+                  ))}
+                </div>
+
+                {isAdmin ? (
+                  <button style={styles.primaryBtnLg} onClick={saveManualTeams}>Save teams →</button>
+                ) : (
+                  <p style={styles.muted}>The admin is entering teams directly — check back shortly.</p>
+                )}
+              </>
             )}
           </section>
         )}
@@ -712,7 +846,11 @@ function BadmintonApp() {
           <section>
             <div style={styles.sectionHead}>
               <h2 style={styles.h2}>Doubles teams</h2>
-              {isAdmin && teams.length > 0 && <button style={styles.linkBtn} onClick={shuffleTeams}>Reshuffle</button>}
+              {isAdmin && teams.length > 0 && (
+                entryMode === "manual"
+                  ? <button style={styles.linkBtn} onClick={() => setTab("players")}>Edit teams</button>
+                  : <button style={styles.linkBtn} onClick={shuffleTeams}>Reshuffle</button>
+              )}
             </div>
             {teams.length === 0 ? (
               <p style={styles.muted}>No teams yet — go to Players and shuffle first.</p>
@@ -931,6 +1069,11 @@ const styles = {
   playerGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 16 },
   playerRow: { display: "flex", alignItems: "center", gap: 6, background: "#fff", border: "1px solid #E4E0D2", borderRadius: 8, padding: "6px 8px" },
   playerNum: { fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "#6C7A76", width: 20 },
+  modeToggleRow: { display: "flex", gap: 6, marginBottom: 8 },
+  modeBtn: { flex: 1, border: "1px solid #E4E0D2", background: "#fff", color: "#6C7A76", fontSize: 12.5, fontWeight: 700, padding: "9px 10px", borderRadius: 8 },
+  modeBtnActive: { background: "#16211F", color: "#C4D93B", border: "1px solid #16211F" },
+  manualTeamList: { display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 },
+  manualTeamRow: { display: "flex", alignItems: "center", gap: 8, background: "#fff", border: "1px solid #E4E0D2", borderRadius: 8, padding: "8px 10px" },
   input: { border: "none", outline: "none", fontSize: 14, flex: 1, minWidth: 0, background: "transparent" },
   inputDisabled: { background: "#F1F0E6", color: "#A8A99C" },
   primaryBtnLg: { width: "100%", background: "#0F5257", color: "#fff", border: "none", borderRadius: 10, padding: "14px", fontSize: 15, fontWeight: 700, fontFamily: "'Oswald', sans-serif", textTransform: "uppercase", letterSpacing: 0.5 },
